@@ -86,7 +86,7 @@ export default function SettlePage() {
   const youAreOwed = netBalance > 0;
 
   return (
-    <PageShell userName={userName} unsettledBalance={-Math.abs(netBalance)}>
+    <PageShell userName={userName}>
       <div className="flex justify-between items-center mb-8">
         <h1 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">
           Settled Up

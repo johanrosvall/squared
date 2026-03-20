@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import {
   TrendingDown,
@@ -10,109 +10,169 @@ import {
   List,
   ArrowRight,
   Upload,
-  Scale,
   RefreshCw,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
-import { Card, Button, Badge } from "@/components/ui";
+import { Card, Button } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate, pct, cn } from "@/lib/utils";
 import { buildRateMap, convert } from "@/lib/currency";
 import type { Transaction, Category, Account } from "@/lib/types";
 
+type Period = "30d" | "month" | "3m" | "year";
+
+const PERIOD_LABELS: Record<Period, string> = {
+  "30d": "Last 30 Days",
+  month: "This Month",
+  "3m": "Last 3 Months",
+  year: "This Year",
+};
+
+function getDateRange(period: Period): { from: string; to: string } {
+  const now = new Date();
+  const to = now.toISOString().slice(0, 10);
+  let from: Date;
+  if (period === "30d") {
+    from = new Date(now);
+    from.setDate(from.getDate() - 29);
+  } else if (period === "month") {
+    from = new Date(now.getFullYear(), now.getMonth(), 1);
+  } else if (period === "3m") {
+    from = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+  } else {
+    from = new Date(now.getFullYear(), 0, 1);
+  }
+  return { from: from.toISOString().slice(0, 10), to };
+}
+
 export default function DashboardPage() {
   const supabase = createClient();
   const [userName, setUserName] = useState("");
-  const [displayCurrency, setDisplayCurrency] = useState("SEK");
+  const [displayCurrency, setDisplayCurrency] = useState("");
   const [rateMap, setRateMap] = useState(new Map<string, number>());
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [unsettledBalance, setUnsettledBalance] = useState(0);
+  const [period, setPeriod] = useState<Period>("30d");
   const [loadingTx, setLoadingTx] = useState(true);
   const [convertingRates, setConvertingRates] = useState(false);
 
-  // Stage 1: fetch everything except FX rates
+  // Load user + profile currency once
   useEffect(() => {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
-      if (user) setUserName(user.user_metadata?.name || user.email || "");
-
-      let dc = "SEK";
       if (user) {
-        const { data: profile } = await supabase.from("profiles").select("default_currency").eq("id", user.id).single();
-        if (profile?.default_currency) { dc = profile.default_currency; setDisplayCurrency(dc); }
+        setUserName(user.user_metadata?.name || user.email || "");
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("default_currency")
+          .eq("id", user.id)
+          .single();
+        setDisplayCurrency(profile?.default_currency || "SEK");
+      } else {
+        setDisplayCurrency("SEK");
       }
+    })();
+  }, [supabase]);
 
-      const now = new Date();
-      const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-      const monthEnd = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, "0")}-01`;
+  // Load transactions whenever period or currency changes (currency must be set first)
+  useEffect(() => {
+    if (!displayCurrency) return;
+    const { from, to } = getDateRange(period);
+    setLoadingTx(true);
+    setRateMap(new Map());
 
-      const [{ data: txs }, { data: cats }, { data: accts }, { data: unsettled }] = await Promise.all([
-        supabase.from("transactions").select("*, category:categories(*), account:accounts(*)")
-          .gte("date", monthStart).lt("date", monthEnd).order("date", { ascending: false }),
-        supabase.from("categories").select("*"),
+    (async () => {
+      const [{ data: txs }, { data: accts }] = await Promise.all([
+        supabase
+          .from("transactions")
+          .select("*, category:categories(*), account:accounts(*)")
+          .gte("date", from)
+          .lte("date", to)
+          .order("date", { ascending: false }),
         supabase.from("accounts").select("*").eq("is_active", true),
-        supabase.from("transactions").select("amount, currency, date")
-          .eq("is_shared", true).in("reimbursement_status", ["none", "pending", "partial"]),
       ]);
 
       if (txs) setTransactions(txs);
-      if (cats) setCategories(cats);
       if (accts) setAccounts(accts);
-      if (unsettled) {
-        const total = unsettled.reduce((s, t) => s + Math.abs(Number(t.amount)) * 0.5, 0);
-        setUnsettledBalance(-total);
-      }
       setLoadingTx(false);
 
-      // Stage 2: build FX rate map (may take several seconds — run after render)
+      // FX conversion in background
       if (txs) {
-        const foreign = txs.filter((t) => t.currency && t.currency !== dc);
+        const foreign = txs.filter((t) => t.currency && t.currency !== displayCurrency);
         if (foreign.length > 0) {
           setConvertingRates(true);
-          const rm = await buildRateMap(txs, dc);
+          const rm = await buildRateMap(txs, displayCurrency);
           setRateMap(rm);
           setConvertingRates(false);
         }
       }
     })();
-  }, [supabase]);
+  }, [supabase, period, displayCurrency]);
 
-  const expenses = transactions.filter((t) => t.amount > 0 && t.transaction_type === "expense");
-  const incomes = transactions.filter((t) => t.amount < 0 || t.transaction_type === "income");
+  const cvt = (t: Transaction) =>
+    convert(t.amount, t.currency, t.date, displayCurrency, rateMap);
 
-  const cvt = (t: Transaction) => convert(t.amount, t.currency, t.date, displayCurrency, rateMap);
+  const expenses = useMemo(
+    () => transactions.filter((t) => t.amount > 0 && t.transaction_type === "expense"),
+    [transactions]
+  );
+  const incomes = useMemo(
+    () => transactions.filter((t) => t.amount < 0 || t.transaction_type === "income"),
+    [transactions]
+  );
 
-  const totalSpending = expenses.reduce((s, t) => s + cvt(t), 0);
-  const totalIncome = incomes.reduce((s, t) => s + Math.abs(cvt(t)), 0);
+  const totalSpending = useMemo(() => expenses.reduce((s, t) => s + cvt(t), 0), [expenses, rateMap]);
+  const totalIncome = useMemo(() => incomes.reduce((s, t) => s + Math.abs(cvt(t)), 0), [incomes, rateMap]);
+  const netBalance = totalIncome - totalSpending;
 
-  // Group spending by category (converted)
-  const spendingByCategory = new Map<string, { name: string; color: string; total: number }>();
-  for (const tx of expenses) {
-    const cat = tx.category as Category | undefined;
-    const key = cat?.id || "uncategorized";
-    const existing = spendingByCategory.get(key) || {
-      name: cat?.name || "Uncategorized",
-      color: cat?.color || "#D4D4D4",
-      total: 0,
-    };
-    existing.total += cvt(tx);
-    spendingByCategory.set(key, existing);
-  }
-  const categoryList = Array.from(spendingByCategory.values()).sort((a, b) => b.total - a.total);
+  // Category breakdown
+  const categoryList = useMemo(() => {
+    const map = new Map<string, { name: string; color: string; total: number }>();
+    for (const tx of expenses) {
+      const cat = tx.category as Category | undefined;
+      const key = cat?.id || "uncategorized";
+      const entry = map.get(key) || {
+        name: cat?.name || "Uncategorized",
+        color: cat?.color || "#D4D4D4",
+        total: 0,
+      };
+      entry.total += cvt(tx);
+      map.set(key, entry);
+    }
+    return Array.from(map.values()).sort((a, b) => b.total - a.total);
+  }, [expenses, rateMap]);
 
-  // Month name
-  const monthName = new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  // Format helper — shows "—" until currency is known
+  const fmt = (n: number) => (displayCurrency ? formatCurrency(n, displayCurrency) : "—");
 
-  // CTA conditions
   const hasNoImports = !loadingTx && transactions.length === 0;
-  const hasUnsettled = unsettledBalance < -50;
 
   return (
-    <PageShell userName={userName} unsettledBalance={unsettledBalance}>
-      {/* Loading / status bar */}
+    <PageShell userName={userName}>
+      {/* ─── Period selector ──────────────────── */}
+      <div className="flex justify-between items-center mb-8">
+        <h1 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">
+          Dashboard
+        </h1>
+        <div className="flex border-2 border-sq-black">
+          {(Object.keys(PERIOD_LABELS) as Period[]).map((p) => (
+            <button
+              key={p}
+              onClick={() => setPeriod(p)}
+              className={cn(
+                "px-4 py-2 font-sans font-semibold text-[11px] uppercase tracking-wider transition-colors border-r border-sq-black last:border-r-0",
+                period === p
+                  ? "bg-sq-black text-sq-white"
+                  : "text-sq-gray-600 hover:text-sq-black hover:bg-sq-gray-100"
+              )}
+            >
+              {PERIOD_LABELS[p]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Loading / FX status */}
       {(loadingTx || convertingRates) && (
         <div className="flex items-center gap-3 mb-6 px-4 py-3 bg-sq-gray-100 border border-sq-gray-100 font-sans text-[13px] text-sq-gray-600">
           <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
@@ -122,14 +182,16 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* CTAs */}
+      {/* CTA: no imports */}
       {hasNoImports && (
         <div className="border-2 border-sq-blue bg-blue-50 p-6 flex items-center justify-between mb-8">
           <div className="flex items-center gap-3">
             <Upload className="w-5 h-5 text-sq-blue" />
             <div>
               <div className="font-sans font-bold text-[14px] text-sq-black">Import new statements</div>
-              <div className="font-sans text-[13px] text-sq-gray-600">Get started by importing your first CSV bank statement.</div>
+              <div className="font-sans text-[13px] text-sq-gray-600">
+                Get started by importing your first CSV bank statement.
+              </div>
             </div>
           </div>
           <Link href="/import">
@@ -138,51 +200,72 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {hasUnsettled && (
-        <div className="border-2 border-sq-purple bg-purple-50 p-6 flex items-center justify-between mb-8">
-          <div className="flex items-center gap-3">
-            <Scale className="w-5 h-5 text-sq-purple" />
-            <div>
-              <div className="font-sans font-bold text-[14px] text-sq-black">Settle up with your partner</div>
-              <div className="font-sans text-[13px] text-sq-gray-600">
-                You have {formatCurrency(Math.abs(unsettledBalance), displayCurrency)} in unreimbursed shared expenses.
-              </div>
-            </div>
+      {/* ─── Summary row ──────────────────────── */}
+      <div className="grid grid-cols-3 gap-6 mb-10">
+        <Card>
+          <div className="sq-label-muted mb-2 flex items-center gap-1.5">
+            <TrendingDown className="w-3 h-3 text-sq-red" /> Spending
           </div>
-          <Link href="/reconcile">
-            <Button>Settle Up <ArrowRight className="w-4 h-4" /></Button>
-          </Link>
-        </div>
-      )}
+          <div className="font-mono text-[36px] font-bold text-sq-red leading-none">
+            {fmt(totalSpending)}
+          </div>
+          <div className="font-sans text-[12px] text-sq-gray-400 mt-2">
+            {expenses.length} transactions
+          </div>
+        </Card>
 
-      {/* ─── Spending Section ─────────────────── */}
-      <div className="mb-12">
-        <h2 className="font-sans font-extrabold text-[24px] text-sq-black uppercase tracking-tight mb-6 flex items-center gap-3">
-          <TrendingDown className="w-6 h-6 text-sq-red" />
-          Spending
-        </h2>
-        <div className="grid grid-cols-4 gap-6 mb-6">
-          <Card>
-            <div className="sq-label-muted mb-2">Total ({monthName.split(" ")[0]})</div>
-            <div className="font-mono text-[32px] font-bold text-sq-red">
-              {formatCurrency(totalSpending, displayCurrency)}
-            </div>
-          </Card>
-          {categoryList.slice(0, 3).map((cat) => (
-            <Card key={cat.name}>
-              <div className="sq-label-muted mb-2">{cat.name}</div>
-              <div className="font-mono text-[28px] font-bold text-sq-black">
-                {formatCurrency(cat.total, displayCurrency)}
-              </div>
-              <div className="font-sans text-[12px] text-sq-gray-600 mt-1">
-                {pct(cat.total, totalSpending)}
-              </div>
-            </Card>
-          ))}
-        </div>
+        <Card>
+          <div className="sq-label-muted mb-2 flex items-center gap-1.5">
+            <TrendingUp className="w-3 h-3 text-sq-green" /> Income
+          </div>
+          <div className="font-mono text-[36px] font-bold text-sq-green leading-none">
+            {fmt(totalIncome)}
+          </div>
+          <div className="font-sans text-[12px] text-sq-gray-400 mt-2">
+            {incomes.length} transactions
+          </div>
+        </Card>
 
-        {/* Category table */}
-        {categoryList.length > 0 && (
+        <Card>
+          <div className="sq-label-muted mb-2">Balance</div>
+          <div
+            className={cn(
+              "font-mono text-[36px] font-bold leading-none",
+              netBalance >= 0 ? "text-sq-green" : "text-sq-red"
+            )}
+          >
+            {fmt(netBalance)}
+          </div>
+          <div className="font-sans text-[12px] text-sq-gray-400 mt-2">
+            income minus spending
+          </div>
+        </Card>
+      </div>
+
+      {/* ─── Spending by Category ─────────────── */}
+      {categoryList.length > 0 && (
+        <div className="mb-12">
+          <h2 className="font-sans font-extrabold text-[20px] text-sq-black uppercase tracking-tight mb-4 flex items-center gap-2">
+            <TrendingDown className="w-5 h-5 text-sq-red" /> Spending by Category
+          </h2>
+
+          {/* Top 3 chips */}
+          <div className="grid grid-cols-3 gap-4 mb-4">
+            {categoryList.slice(0, 3).map((cat) => (
+              <Card key={cat.name}>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-3 h-3 rounded-full" style={{ backgroundColor: cat.color }} />
+                  <span className="sq-label-muted">{cat.name}</span>
+                </div>
+                <div className="font-mono text-[24px] font-bold text-sq-black">{fmt(cat.total)}</div>
+                <div className="font-sans text-[12px] text-sq-gray-600 mt-1">
+                  {pct(cat.total, totalSpending)}
+                </div>
+              </Card>
+            ))}
+          </div>
+
+          {/* Full category table */}
           <div className="border border-sq-black">
             <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-sq-gray-100 border-b border-sq-black">
               <div className="col-span-6 sq-label-muted">Category</div>
@@ -190,13 +273,16 @@ export default function DashboardPage() {
               <div className="col-span-3 text-right sq-label-muted">% of Total</div>
             </div>
             {categoryList.map((cat) => (
-              <div key={cat.name} className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
+              <div
+                key={cat.name}
+                className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center"
+              >
                 <div className="col-span-6 flex items-center gap-2">
                   <div className="w-3 h-3 rounded-full" style={{ backgroundColor: cat.color }} />
                   <span className="font-sans text-[14px] text-sq-black">{cat.name}</span>
                 </div>
                 <div className="col-span-3 text-right font-mono text-[14px] text-sq-black font-bold">
-                  {formatCurrency(cat.total, displayCurrency)}
+                  {fmt(cat.total)}
                 </div>
                 <div className="col-span-3 text-right font-mono text-[14px] text-sq-gray-600">
                   {pct(cat.total, totalSpending)}
@@ -204,51 +290,19 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* ─── Incomes Section ──────────────────── */}
-      <div className="mb-12">
-        <h2 className="font-sans font-extrabold text-[24px] text-sq-black uppercase tracking-tight mb-6 flex items-center gap-3">
-          <TrendingUp className="w-6 h-6 text-sq-green" />
-          Incomes
-        </h2>
-        <Card>
-          <div className="sq-label-muted mb-2">Total Income ({monthName.split(" ")[0]})</div>
-          <div className="font-mono text-[32px] font-bold text-sq-green">
-            {formatCurrency(totalIncome, displayCurrency)}
-          </div>
-        </Card>
-        {incomes.length > 0 && (
-          <div className="border border-sq-black mt-6">
-            <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-sq-gray-100 border-b border-sq-black">
-              <div className="col-span-5 sq-label-muted">Source</div>
-              <div className="col-span-4 text-right sq-label-muted">Amount</div>
-              <div className="col-span-3 text-right sq-label-muted">Date</div>
-            </div>
-            {incomes.slice(0, 5).map((tx) => (
-              <div key={tx.id} className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
-                <div className="col-span-5 font-sans text-[14px] text-sq-black">{tx.description}</div>
-                <div className="col-span-4 text-right font-mono text-[14px] text-sq-green font-bold">
-                  {formatCurrency(Math.abs(tx.amount), displayCurrency)}
-                </div>
-                <div className="col-span-3 text-right font-mono text-[13px] text-sq-gray-600">
-                  {formatDate(tx.date)}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ─── Transaction List Summary ─────────── */}
+      {/* ─── Recent Transactions ──────────────── */}
       <div>
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="font-sans font-extrabold text-[24px] text-sq-black uppercase tracking-tight flex items-center gap-3">
-            <List className="w-6 h-6 text-sq-black" />
-            Recent Transactions
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="font-sans font-extrabold text-[20px] text-sq-black uppercase tracking-tight flex items-center gap-2">
+            <List className="w-5 h-5 text-sq-black" /> Recent Transactions
           </h2>
-          <Link href="/transactions" className="font-sans font-semibold text-[12px] uppercase tracking-wider text-sq-blue hover:underline flex items-center gap-1">
+          <Link
+            href="/transactions"
+            className="font-sans font-semibold text-[12px] uppercase tracking-wider text-sq-blue hover:underline flex items-center gap-1"
+          >
             View All <ArrowRight className="w-3 h-3" />
           </Link>
         </div>
@@ -259,25 +313,34 @@ export default function DashboardPage() {
             <div className="col-span-3 sq-label-muted">Account</div>
             <div className="col-span-2 text-right sq-label-muted">Amount</div>
           </div>
-          {transactions.length === 0 ? (
+          {transactions.length === 0 && !loadingTx ? (
             <div className="px-6 py-8 text-center text-sq-gray-600 font-sans text-[14px]">
-              No transactions this month. Import a CSV to get started.
+              No transactions for this period.
             </div>
           ) : (
-            transactions.slice(0, 8).map((tx) => {
+            transactions.slice(0, 10).map((tx) => {
               const account = tx.account as Account | undefined;
               return (
-                <div key={tx.id} className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
-                  <div className="col-span-2 font-mono text-[13px] text-sq-gray-600">{formatDate(tx.date)}</div>
-                  <div className="col-span-5 font-sans text-[14px] text-sq-black truncate">{tx.description}</div>
+                <div
+                  key={tx.id}
+                  className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center"
+                >
+                  <div className="col-span-2 font-mono text-[13px] text-sq-gray-600">
+                    {formatDate(tx.date)}
+                  </div>
+                  <div className="col-span-5 font-sans text-[14px] text-sq-black truncate">
+                    {tx.description}
+                  </div>
                   <div className="col-span-3 font-sans text-[12px] text-sq-gray-600 uppercase tracking-wider truncate">
                     {account?.name || "—"}
                   </div>
-                  <div className={cn(
-                    "col-span-2 text-right font-mono text-[14px] font-bold",
-                    tx.amount < 0 ? "text-sq-green" : "text-sq-black"
-                  )}>
-                    {formatCurrency(tx.amount, displayCurrency)}
+                  <div
+                    className={cn(
+                      "col-span-2 text-right font-mono text-[14px] font-bold",
+                      tx.amount < 0 ? "text-sq-green" : "text-sq-black"
+                    )}
+                  >
+                    {fmt(cvt(tx))}
                   </div>
                 </div>
               );

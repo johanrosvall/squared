@@ -3,7 +3,7 @@
 import React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { cn, formatCurrency } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 
 const navItems = [
@@ -14,10 +14,9 @@ const navItems = [
 
 interface GlobalNavProps {
   userName?: string;
-  unsettledBalance?: number;
 }
 
-export function GlobalNav({ userName = "", unsettledBalance = 0 }: GlobalNavProps) {
+export function GlobalNav({ userName = "" }: GlobalNavProps) {
   const pathname = usePathname();
   const router = useRouter();
   const initials = userName
@@ -66,23 +65,8 @@ export function GlobalNav({ userName = "", unsettledBalance = 0 }: GlobalNavProp
         </nav>
       </div>
 
-      {/* Right: Balance + Import + Avatar */}
+      {/* Right: Import + Avatar */}
       <div className="flex items-center gap-6">
-        {/* Unsettled balance indicator */}
-        <div className="flex items-center gap-3">
-          <span className="font-sans font-semibold text-[12px] uppercase tracking-wider text-sq-gray-600">
-            Unsettled Shared Balance
-          </span>
-          <span
-            className={cn(
-              "font-mono text-[15px] font-medium",
-              unsettledBalance < 0 ? "text-sq-red" : unsettledBalance > 0 ? "text-sq-green" : "text-sq-gray-600"
-            )}
-          >
-            {formatCurrency(unsettledBalance)}
-          </span>
-        </div>
-
         {/* Import CSV button */}
         <Link
           href="/import"
