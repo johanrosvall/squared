@@ -8,11 +8,10 @@ import {
   TrendingDown,
   TrendingUp,
   List,
-  AlertTriangle,
   ArrowRight,
   Upload,
   Scale,
-  Copy,
+  RefreshCw,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Card, Button, Badge } from "@/components/ui";
@@ -30,54 +29,53 @@ export default function DashboardPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [unsettledBalance, setUnsettledBalance] = useState(0);
+  const [loadingTx, setLoadingTx] = useState(true);
+  const [convertingRates, setConvertingRates] = useState(false);
 
+  // Stage 1: fetch everything except FX rates
   useEffect(() => {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) setUserName(user.user_metadata?.name || user.email || "");
 
-      // Load display currency from profile
+      let dc = "SEK";
       if (user) {
         const { data: profile } = await supabase.from("profiles").select("default_currency").eq("id", user.id).single();
-        if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
+        if (profile?.default_currency) { dc = profile.default_currency; setDisplayCurrency(dc); }
       }
 
-      // Fetch current month transactions
       const now = new Date();
       const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
       const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
       const monthEnd = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, "0")}-01`;
 
-      const { data: txs } = await supabase
-        .from("transactions")
-        .select("*, category:categories(*), account:accounts(*)")
-        .gte("date", monthStart)
-        .lt("date", monthEnd)
-        .order("date", { ascending: false });
-      if (txs) {
-        setTransactions(txs);
-        // Build rate map for any foreign-currency transactions
-        const dc = (await supabase.from("profiles").select("default_currency").eq("id", user?.id ?? "").single()).data?.default_currency || "SEK";
-        const rm = await buildRateMap(txs, dc);
-        setRateMap(rm);
-        setDisplayCurrency(dc);
-      }
+      const [{ data: txs }, { data: cats }, { data: accts }, { data: unsettled }] = await Promise.all([
+        supabase.from("transactions").select("*, category:categories(*), account:accounts(*)")
+          .gte("date", monthStart).lt("date", monthEnd).order("date", { ascending: false }),
+        supabase.from("categories").select("*"),
+        supabase.from("accounts").select("*").eq("is_active", true),
+        supabase.from("transactions").select("amount, currency, date")
+          .eq("is_shared", true).in("reimbursement_status", ["none", "pending", "partial"]),
+      ]);
 
-      const { data: cats } = await supabase.from("categories").select("*");
+      if (txs) setTransactions(txs);
       if (cats) setCategories(cats);
-
-      const { data: accts } = await supabase.from("accounts").select("*").eq("is_active", true);
       if (accts) setAccounts(accts);
-
-      // Calculate unsettled shared balance
-      const { data: unsettled } = await supabase
-        .from("transactions")
-        .select("amount, currency, date")
-        .eq("is_shared", true)
-        .in("reimbursement_status", ["none", "pending", "partial"]);
       if (unsettled) {
         const total = unsettled.reduce((s, t) => s + Math.abs(Number(t.amount)) * 0.5, 0);
         setUnsettledBalance(-total);
+      }
+      setLoadingTx(false);
+
+      // Stage 2: build FX rate map (may take several seconds — run after render)
+      if (txs) {
+        const foreign = txs.filter((t) => t.currency && t.currency !== dc);
+        if (foreign.length > 0) {
+          setConvertingRates(true);
+          const rm = await buildRateMap(txs, dc);
+          setRateMap(rm);
+          setConvertingRates(false);
+        }
       }
     })();
   }, [supabase]);
@@ -109,11 +107,21 @@ export default function DashboardPage() {
   const monthName = new Date().toLocaleDateString("en-US", { month: "long", year: "numeric" });
 
   // CTA conditions
-  const hasNoImports = transactions.length === 0;
+  const hasNoImports = !loadingTx && transactions.length === 0;
   const hasUnsettled = unsettledBalance < -50;
 
   return (
     <PageShell userName={userName} unsettledBalance={unsettledBalance}>
+      {/* Loading / status bar */}
+      {(loadingTx || convertingRates) && (
+        <div className="flex items-center gap-3 mb-6 px-4 py-3 bg-sq-gray-100 border border-sq-gray-100 font-sans text-[13px] text-sq-gray-600">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+          {loadingTx
+            ? "Fetching transactions…"
+            : `Converting currencies for ${transactions.filter((t) => t.currency && t.currency !== displayCurrency).length} foreign transactions…`}
+        </div>
+      )}
+
       {/* CTAs */}
       {hasNoImports && (
         <div className="border-2 border-sq-blue bg-blue-50 p-6 flex items-center justify-between mb-8">

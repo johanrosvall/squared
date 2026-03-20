@@ -3,7 +3,7 @@
 export const dynamic = "force-dynamic";
 
 import React, { useState, useEffect, useMemo } from "react";
-import { TrendingDown, TrendingUp, Users, Calendar } from "lucide-react";
+import { TrendingDown, TrendingUp, Users, Calendar, RefreshCw } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Card } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
@@ -136,6 +136,7 @@ export default function AnalyticsPage() {
   const [period, setPeriod] = useState<Period>("this_month");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
+  const [convertingRates, setConvertingRates] = useState(false);
 
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data: { user } }) => {
@@ -150,6 +151,7 @@ export default function AnalyticsPage() {
   useEffect(() => {
     const { from, to } = getDateRange(period);
     setLoading(true);
+    setRateMap(new Map());
     supabase
       .from("transactions")
       .select("*, category:categories(*), account:accounts(*)")
@@ -159,10 +161,18 @@ export default function AnalyticsPage() {
       .then(async ({ data }) => {
         if (data) {
           setTransactions(data);
-          const rm = await buildRateMap(data, displayCurrency);
-          setRateMap(rm);
+          setLoading(false);
+          // Build FX rates after transactions are visible
+          const foreign = data.filter((t) => t.currency && t.currency !== displayCurrency);
+          if (foreign.length > 0) {
+            setConvertingRates(true);
+            const rm = await buildRateMap(data, displayCurrency);
+            setRateMap(rm);
+            setConvertingRates(false);
+          }
+        } else {
+          setLoading(false);
         }
-        setLoading(false);
       });
   }, [supabase, period, displayCurrency]);
 
@@ -243,6 +253,13 @@ export default function AnalyticsPage() {
           ))}
         </div>
       </div>
+
+      {convertingRates && (
+        <div className="flex items-center gap-3 mb-6 px-4 py-3 bg-sq-gray-100 border border-sq-gray-100 font-sans text-[13px] text-sq-gray-600">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
+          Converting currencies for {transactions.filter((t) => t.currency && t.currency !== displayCurrency).length} foreign transactions…
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-24 text-sq-gray-400 font-sans text-[14px]">
