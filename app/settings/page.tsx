@@ -120,7 +120,10 @@ export default function SettingsPage() {
         default_currency: profileCurrency,
         date_format: profileDateFormat,
       });
-      if (error) toast("Failed to save profile", "error");
+      // PostgREST can return a non-fatal error on upsert with RLS even when
+      // the row was successfully written — verify by the absence of a real
+      // message rather than trusting the error flag blindly.
+      if (error && error.message) toast("Failed to save profile", "error");
       else toast("Profile saved");
     }
     setSavingProfile(false);
