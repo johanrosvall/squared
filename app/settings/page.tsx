@@ -411,7 +411,7 @@ export default function SettingsPage() {
       {/* Add new rule */}
       <Card className="mb-6">
         <div className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-black mb-4">New Rule</div>
-        <div className="grid grid-cols-3 gap-4 mb-4">
+        <div className="grid grid-cols-3 gap-4 mb-4 items-end">
           <div>
             <label className="block sq-label mb-2">Keyword (description contains)</label>
             <input

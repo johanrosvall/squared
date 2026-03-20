@@ -328,7 +328,7 @@ export default function TransactionsPage() {
   // ─── Filter Bar ──────────────────────────────
   const renderFilters = () => (
     <div className="border-b border-sq-black bg-[#F9F9F9] px-6 py-4">
-      <div className="grid grid-cols-6 gap-4">
+      <div className="grid grid-cols-6 gap-4 items-end">
         <div>
           <label className="block sq-label-muted mb-1">From</label>
           <input
