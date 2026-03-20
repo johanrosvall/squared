@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://fonts.googleapis.com/css2?family=Albert+Sans:ital,wght@0,100..900;1,100..900&family=DM+Mono:wght@300;400;500&display=swap");
+
+@layer base {
+  body {
+    @apply bg-sq-white text-sq-black font-sans antialiased;
+  }
+
+  /* Squared design system utilities */
+  input,
+  select,
+  textarea {
+    @apply outline-none;
+  }
+}
+
+@layer components {
+  /* Consistent label style used across all mockups */
+  .sq-label {
+    @apply font-sans font-semibold text-[12px] uppercase tracking-widest text-sq-black;
+  }
+
+  .sq-label-muted {
+    @apply font-sans font-bold text-[11px] uppercase tracking-[0.15em] text-sq-gray-600;
+  }
+
+  /* Mono number display */
+  .sq-number {
+    @apply font-mono font-bold;
+  }
+
+  .sq-number-lg {
+    @apply font-mono text-[28px] font-bold text-sq-black;
+  }
+
+  .sq-number-xl {
+    @apply font-mono text-[32px] font-bold;
+  }
+}
