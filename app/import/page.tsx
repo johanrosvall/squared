@@ -3,6 +3,7 @@
 export const dynamic = "force-dynamic";
 
 import React, { useState, useEffect, useCallback } from "react";
+import * as XLSX from "xlsx";
 import {
   Upload,
   CheckCircle,
@@ -63,23 +64,95 @@ export default function ImportPage() {
   }, [supabase]);
 
   // ─── Step 1: Upload ──────────────────────────
+  const [isXlsxFormat, setIsXlsxFormat] = useState(false);
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
+
+    const isXlsx = /\.(xlsx|xls)$/i.test(file.name);
+    if (isXlsx) {
+      parseXLSX(file);
+    } else {
+      setIsXlsxFormat(false);
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const text = ev.target?.result as string;
+        setCsvText(text);
+        parseCSV(text);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  // ─── XLSX Parser (Fakturadetaljer / Swedish CC format) ───
+  const parseXLSX = (file: File) => {
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      setCsvText(text);
-      parseCSV(text);
+      const data = ev.target?.result;
+      const wb = XLSX.read(data, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as (string | number)[][];
+
+      // Detect "Fakturadetaljer" format: has "Datum"/"Bokfört"/"Belopp" header row
+      const isFaktura = allRows.some(
+        (row) => String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
+      );
+
+      if (isFaktura) {
+        // Extract only valid transaction rows:
+        // - col 0 must be a YYYY-MM-DD date string
+        // - col 6 must be a number (the SEK amount)
+        const txRows = allRows.filter((row) => {
+          const dateStr = String(row[0] || "");
+          const amount = row[6];
+          return /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && typeof amount === "number";
+        });
+
+        const h = ["Datum", "Bokfört", "Beskrivning", "Ort", "Valuta", "Belopp"];
+        const r = txRows.map((row) => [
+          String(row[0]),                                           // purchase date
+          String(row[1]),                                           // posted date
+          String(row[2]),                                           // description
+          String(row[3]),                                           // location
+          String(row[4] || "SEK"),                                  // currency
+          String(row[6]),                                           // SEK amount
+        ]);
+
+        setHeaders(h);
+        setRows(r);
+        setIsXlsxFormat(true);
+        setMapping({
+          date_column: "Datum",
+          date_type: "purchase",
+          amount_column: "Belopp",
+          amount_sign: "as_is",
+          description_column: "Beskrivning",
+          id_column: "",
+        });
+      } else {
+        // Generic XLSX: convert first sheet to CSV-like format
+        setIsXlsxFormat(false);
+        const jsonRows = XLSX.utils.sheet_to_json(ws, { defval: "" }) as Record<string, unknown>[];
+        if (jsonRows.length === 0) return;
+        const h = Object.keys(jsonRows[0]);
+        const r = jsonRows.map((row) => h.map((k) => String(row[k] ?? "")));
+        setHeaders(h);
+        setRows(r);
+        const lower = h.map((x) => x.toLowerCase());
+        const dateCol = h[lower.findIndex((x) => x.includes("date"))] || "";
+        const amtCol = h[lower.findIndex((x) => x.includes("amount") || x.includes("sum"))] || "";
+        const descCol = h[lower.findIndex((x) => x.includes("description") || x.includes("memo") || x.includes("text"))] || "";
+        setMapping((m) => ({ ...m, date_column: dateCol, amount_column: amtCol, description_column: descCol }));
+      }
     };
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
   };
 
   const parseCSV = (text: string) => {
     const lines = text.split(/\r?\n/).filter((l) => l.trim());
     if (lines.length < 2) return;
-    // Simple CSV parse (handles basic cases; papaparse for production)
     const parseLine = (line: string): string[] => {
       const result: string[] = [];
       let current = "";
@@ -135,14 +208,19 @@ export default function ImportPage() {
         <label className="border-2 border-dashed border-sq-black p-12 flex flex-col items-center justify-center cursor-pointer hover:bg-sq-gray-100 transition-colors">
           <Upload className="w-8 h-8 text-sq-gray-600 mb-3" />
           <span className="font-sans font-semibold text-[14px] text-sq-black">
-            {fileName || "Click to select CSV file"}
+            {fileName || "Click to select file"}
           </span>
           <span className="font-sans text-[12px] text-sq-gray-600 mt-1">
-            or drag and drop
+            CSV or XLSX — drag and drop or click
           </span>
+          {isXlsxFormat && (
+            <span className="mt-2 px-3 py-1 bg-sq-green text-sq-white font-sans font-semibold text-[11px] uppercase tracking-wider">
+              Fakturadetaljer format detected — auto-mapped
+            </span>
+          )}
           <input
             type="file"
-            accept=".csv,.tsv,.txt"
+            accept=".csv,.tsv,.txt,.xlsx,.xls"
             className="hidden"
             onChange={handleFileSelect}
           />
@@ -185,9 +263,9 @@ export default function ImportPage() {
       <div className="flex justify-end mt-8">
         <Button
           disabled={!selectedAccountId || rows.length === 0}
-          onClick={() => setStep(2)}
+          onClick={() => isXlsxFormat ? handleCheckDuplicates() : setStep(2)}
         >
-          Next: Column Mapping
+          {isXlsxFormat ? "Next: Check Duplicates" : "Next: Column Mapping"}
           <ChevronRight className="w-4 h-4" />
         </Button>
       </div>
@@ -452,7 +530,7 @@ export default function ImportPage() {
       )}
 
       <div className="flex justify-between mt-8">
-        <Button variant="ghost" onClick={() => setStep(2)}>
+        <Button variant="ghost" onClick={() => setStep(isXlsxFormat ? 1 : 2)}>
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
         <Button onClick={handleImport} disabled={importing}>
@@ -505,12 +583,21 @@ export default function ImportPage() {
         const dateStr = rowObj[mapping.date_column] || "";
         const amtStr = rowObj[mapping.amount_column] || "";
         const desc = rowObj[mapping.description_column] || "";
-        let amt = parseFloat(amtStr.replace(/[^0-9.\-]/g, ""));
+        // For XLSX Fakturadetaljer: combine description + location
+        const location = isXlsxFormat ? (rowObj["Ort"] || "") : "";
+        const fullDesc = location ? `${desc} — ${location}` : desc;
+        const postedStr = isXlsxFormat ? (rowObj["Bokfört"] || "") : "";
+        let amt = parseFloat(String(amtStr).replace(/[^0-9.\-]/g, ""));
         if (isNaN(amt)) throw new Error("Invalid amount");
         if (mapping.amount_sign === "invert") amt = -amt;
         const parsedDate = new Date(dateStr);
         if (isNaN(parsedDate.getTime())) throw new Error("Invalid date");
         const dateFormatted = parsedDate.toISOString().split("T")[0];
+        const postedFormatted = postedStr ? new Date(postedStr).toISOString().split("T")[0] : null;
+
+        // For XLSX: use the currency from the row, fall back to account currency
+        const rowCurrency = isXlsxFormat ? (rowObj["Valuta"] || "") : "";
+        const currency = rowCurrency || accounts.find((a) => a.id === selectedAccountId)?.currency || "SEK";
 
         const txType = amt < 0 ? "income" : "expense";
 
@@ -518,10 +605,10 @@ export default function ImportPage() {
           account_id: selectedAccountId,
           import_batch_id: batch.id,
           date: dateFormatted,
-          posted_date: mapping.date_type === "posted" ? dateFormatted : null,
+          posted_date: postedFormatted || (mapping.date_type === "posted" ? dateFormatted : null),
           amount: amt,
-          currency: accounts.find((a) => a.id === selectedAccountId)?.currency || "USD",
-          description: desc,
+          currency,
+          description: fullDesc,
           raw_description: desc,
           transaction_type: txType,
         });
