@@ -42,6 +42,7 @@ export default function ImportPage() {
     description_column: "",
     id_column: "",
   });
+  const [savedMappingLoaded, setSavedMappingLoaded] = useState(false);
 
   // Step 3: Duplicates
   const [duplicates, setDuplicates] = useState<
@@ -63,13 +64,56 @@ export default function ImportPage() {
     })();
   }, [supabase]);
 
+  // ─── Saved mapping helpers ───────────────────
+  const storageKey = (accountId: string) => `sq_mapping_${accountId}`;
+
+  const loadSavedMapping = (accountId: string) => {
+    try {
+      const raw = localStorage.getItem(storageKey(accountId));
+      if (!raw) return null;
+      return JSON.parse(raw) as { mapping: CsvColumnMapping; isXlsx: boolean };
+    } catch { return null; }
+  };
+
+  const saveMapping = (accountId: string, m: CsvColumnMapping, isXlsx: boolean) => {
+    try {
+      localStorage.setItem(storageKey(accountId), JSON.stringify({ mapping: m, isXlsx }));
+    } catch { /* ignore */ }
+  };
+
+  // Apply saved mapping if its columns still exist in the current headers
+  const applySavedIfValid = (h: string[], accountId: string): CsvColumnMapping | null => {
+    const saved = loadSavedMapping(accountId);
+    if (!saved) return null;
+    const { mapping: m } = saved;
+    if (h.includes(m.date_column) && h.includes(m.amount_column) && h.includes(m.description_column)) {
+      return m;
+    }
+    return null;
+  };
+
   // ─── Step 1: Upload ──────────────────────────
   const [isXlsxFormat, setIsXlsxFormat] = useState(false);
+
+  // When account changes, check if we have a saved mapping
+  const handleAccountChange = (accountId: string) => {
+    setSelectedAccountId(accountId);
+    setSavedMappingLoaded(false);
+    // If a file is already loaded, try applying saved mapping now
+    if (headers.length > 0 && accountId) {
+      const saved = applySavedIfValid(headers, accountId);
+      if (saved) {
+        setMapping(saved);
+        setSavedMappingLoaded(true);
+      }
+    }
+  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
+    setSavedMappingLoaded(false);
 
     const isXlsx = /\.(xlsx|xls)$/i.test(file.name);
     if (isXlsx) {
@@ -95,15 +139,11 @@ export default function ImportPage() {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as (string | number)[][];
 
-      // Detect "Fakturadetaljer" format: has "Datum"/"Bokfört"/"Belopp" header row
       const isFaktura = allRows.some(
         (row) => String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
       );
 
       if (isFaktura) {
-        // Extract only valid transaction rows:
-        // - col 0 must be a YYYY-MM-DD date string
-        // - col 6 must be a number (the SEK amount)
         const txRows = allRows.filter((row) => {
           const dateStr = String(row[0] || "");
           const amount = row[6];
@@ -112,27 +152,30 @@ export default function ImportPage() {
 
         const h = ["Datum", "Bokfört", "Beskrivning", "Ort", "Valuta", "Belopp"];
         const r = txRows.map((row) => [
-          String(row[0]),                                           // purchase date
-          String(row[1]),                                           // posted date
-          String(row[2]),                                           // description
-          String(row[3]),                                           // location
-          String(row[4] || "SEK"),                                  // currency
-          String(row[6]),                                           // SEK amount
+          String(row[0]),
+          String(row[1]),
+          String(row[2]),
+          String(row[3]),
+          String(row[4] || "SEK"),
+          String(row[6]),
         ]);
 
-        setHeaders(h);
-        setRows(r);
-        setIsXlsxFormat(true);
-        setMapping({
+        const fakturaMapping: CsvColumnMapping = {
           date_column: "Datum",
           date_type: "purchase",
           amount_column: "Belopp",
           amount_sign: "as_is",
           description_column: "Beskrivning",
           id_column: "",
-        });
+        };
+
+        setHeaders(h);
+        setRows(r);
+        setIsXlsxFormat(true);
+        setMapping(fakturaMapping);
+        setSavedMappingLoaded(false); // Faktura is always auto-detected, not "saved"
       } else {
-        // Generic XLSX: convert first sheet to CSV-like format
+        // Generic XLSX
         setIsXlsxFormat(false);
         const jsonRows = XLSX.utils.sheet_to_json(ws, { defval: "" }) as Record<string, unknown>[];
         if (jsonRows.length === 0) return;
@@ -140,52 +183,94 @@ export default function ImportPage() {
         const r = jsonRows.map((row) => h.map((k) => String(row[k] ?? "")));
         setHeaders(h);
         setRows(r);
-        const lower = h.map((x) => x.toLowerCase());
-        const dateCol = h[lower.findIndex((x) => x.includes("date"))] || "";
-        const amtCol = h[lower.findIndex((x) => x.includes("amount") || x.includes("sum"))] || "";
-        const descCol = h[lower.findIndex((x) => x.includes("description") || x.includes("memo") || x.includes("text"))] || "";
-        setMapping((m) => ({ ...m, date_column: dateCol, amount_column: amtCol, description_column: descCol }));
+        const detected = autoDetectMapping(h, r);
+        const saved = selectedAccountId ? applySavedIfValid(h, selectedAccountId) : null;
+        setMapping(saved ?? detected);
+        setSavedMappingLoaded(!!saved);
       }
     };
     reader.readAsArrayBuffer(file);
   };
 
+  // ─── CSV Parser (auto-detects separator) ─────
   const parseCSV = (text: string) => {
     const lines = text.split(/\r?\n/).filter((l) => l.trim());
     if (lines.length < 2) return;
+
+    // Detect separator: whichever of ; , \t gives the most consistent column count
+    const candidates: [string, RegExp][] = [
+      [";", /;/],
+      [",", /,/],
+      ["\t", /\t/],
+    ];
+    const sep = candidates.reduce((best, [s]) => {
+      const count = (lines[0].split(s).length + lines[1].split(s).length) / 2;
+      const bestCount = (lines[0].split(best).length + lines[1].split(best).length) / 2;
+      return count > bestCount ? s : best;
+    }, ",");
+
     const parseLine = (line: string): string[] => {
+      if (sep !== ",") return line.split(sep).map((c) => c.trim().replace(/^"|"$/g, ""));
       const result: string[] = [];
       let current = "";
       let inQuotes = false;
       for (const char of line) {
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === "," && !inQuotes) {
-          result.push(current.trim());
-          current = "";
-        } else {
-          current += char;
-        }
+        if (char === '"') { inQuotes = !inQuotes; }
+        else if (char === "," && !inQuotes) { result.push(current.trim()); current = ""; }
+        else { current += char; }
       }
       result.push(current.trim());
       return result;
     };
+
     const h = parseLine(lines[0]);
     const r = lines.slice(1).map(parseLine);
     setHeaders(h);
     setRows(r);
-    // Auto-guess mapping
-    const lower = h.map((x) => x.toLowerCase());
-    const dateCol = h[lower.findIndex((x) => x.includes("date"))] || "";
-    const amtCol = h[lower.findIndex((x) => x.includes("amount") || x.includes("sum"))] || "";
-    const descCol =
-      h[lower.findIndex((x) => x.includes("description") || x.includes("memo") || x.includes("text"))] || "";
-    setMapping((m) => ({
-      ...m,
+
+    const saved = selectedAccountId ? applySavedIfValid(h, selectedAccountId) : null;
+    const detected = autoDetectMapping(h, r);
+    setMapping(saved ?? detected);
+    setSavedMappingLoaded(!!saved);
+  };
+
+  // ─── Smart column auto-detection ─────────────
+  const autoDetectMapping = (h: string[], r: string[][]): CsvColumnMapping => {
+    const lower = h.map((x) => x.toLowerCase().trim());
+
+    // Swedish and English column name patterns
+    const find = (patterns: string[]) =>
+      h[lower.findIndex((x) => patterns.some((p) => x.includes(p)))] || "";
+
+    const dateCol = find(["bokföringsdatum", "transaktionsdatum", "datum", "date", "transaction date", "trans date", "posted"]);
+    const postedCol = find(["valutadatum", "posted date"]);
+    const descCol = find(["text", "description", "beskrivning", "transaktionstext", "memo", "narrative", "details", "payee"]);
+    const amtCol = find(["belopp", "amount", "sum", "credit", "debit", "transaction amount"]);
+    const idCol = find(["verifikationsnummer", "transaction id", "reference", "id"]);
+
+    // Sign heuristic: if "belopp" or similar Swedish header → bank uses negative for expenses → invert
+    const isSwedishFormat = lower.some((x) => ["belopp", "bokföringsdatum", "valutadatum"].includes(x));
+    // Also check data: sample first 10 non-empty amounts — if majority are negative, likely needs invert
+    let signHeuristic: "as_is" | "invert" = isSwedishFormat ? "invert" : "as_is";
+    if (!isSwedishFormat && amtCol) {
+      const samples = r.slice(0, 10)
+        .map((row) => parseFloat(String(row[h.indexOf(amtCol)] || "").replace(/[^0-9.\-]/g, "")))
+        .filter((n) => !isNaN(n));
+      const negCount = samples.filter((n) => n < 0).length;
+      if (negCount > samples.length * 0.6) signHeuristic = "invert";
+    }
+
+    // Date type: if we found a "posted"/"valutadatum" col AND a separate purchase date col → purchase
+    const dateType: "purchase" | "posted" = postedCol && postedCol !== dateCol ? "purchase" : "purchase";
+
+    return {
       date_column: dateCol,
+      date_type: dateType,
       amount_column: amtCol,
+      amount_sign: signHeuristic,
       description_column: descCol,
-    }));
+      id_column: idCol,
+    };
   };
 
   const renderStep1 = () => (
@@ -193,7 +278,7 @@ export default function ImportPage() {
       <Select
         label="Target Account"
         value={selectedAccountId}
-        onChange={(e) => setSelectedAccountId(e.target.value)}
+        onChange={(e) => handleAccountChange(e.target.value)}
         options={[
           { value: "", label: "Select an account…" },
           ...accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.type.replace("_", " ")})` })),
@@ -216,6 +301,11 @@ export default function ImportPage() {
           {isXlsxFormat && (
             <span className="mt-2 px-3 py-1 bg-sq-green text-sq-white font-sans font-semibold text-[11px] uppercase tracking-wider">
               Fakturadetaljer format detected — auto-mapped
+            </span>
+          )}
+          {savedMappingLoaded && !isXlsxFormat && (
+            <span className="mt-2 px-3 py-1 bg-sq-blue text-sq-white font-sans font-semibold text-[11px] uppercase tracking-wider">
+              Saved column mapping loaded
             </span>
           )}
           <input
@@ -263,9 +353,9 @@ export default function ImportPage() {
       <div className="flex justify-end mt-8">
         <Button
           disabled={!selectedAccountId || rows.length === 0}
-          onClick={() => isXlsxFormat ? handleCheckDuplicates() : setStep(2)}
+          onClick={() => (isXlsxFormat || savedMappingLoaded) ? handleCheckDuplicates() : setStep(2)}
         >
-          {isXlsxFormat ? "Next: Check Duplicates" : "Next: Column Mapping"}
+          {(isXlsxFormat || savedMappingLoaded) ? "Next: Check Duplicates" : "Next: Column Mapping"}
           <ChevronRight className="w-4 h-4" />
         </Button>
       </div>
@@ -530,7 +620,7 @@ export default function ImportPage() {
       )}
 
       <div className="flex justify-between mt-8">
-        <Button variant="ghost" onClick={() => setStep(isXlsxFormat ? 1 : 2)}>
+        <Button variant="ghost" onClick={() => setStep((isXlsxFormat || savedMappingLoaded) ? 1 : 2)}>
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
         <Button onClick={handleImport} disabled={importing}>
@@ -624,6 +714,11 @@ export default function ImportPage() {
       .update({ imported_count: successCount, skipped_count: skipped })
       .eq("id", batch.id);
 
+    // Persist mapping for this account so next import auto-fills
+    if (selectedAccountId && !isXlsxFormat) {
+      saveMapping(selectedAccountId, mapping, false);
+    }
+
     setImportedCount(successCount);
     setFailedRows(errors);
     setImporting(false);
@@ -663,7 +758,7 @@ export default function ImportPage() {
       )}
 
       <div className="flex justify-center gap-4">
-        <Button variant="secondary" onClick={() => { setStep(1); setCsvText(""); setFileName(""); setHeaders([]); setRows([]); }}>
+        <Button variant="secondary" onClick={() => { setStep(1); setCsvText(""); setFileName(""); setHeaders([]); setRows([]); setSavedMappingLoaded(false); }}>
           Import Another File
         </Button>
         <Button onClick={() => (window.location.href = "/transactions")}>
