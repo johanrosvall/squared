@@ -54,6 +54,7 @@ export default function ImportPage() {
   const [importedCount, setImportedCount] = useState(0);
   const [failedRows, setFailedRows] = useState<{ row: number; reason: string }[]>([]);
   const [importing, setImporting] = useState(false);
+  const [importStatus, setImportStatus] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -624,7 +625,9 @@ export default function ImportPage() {
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
         <Button onClick={handleImport} disabled={importing}>
-          {importing ? "Importing…" : `Import ${nonDuplicateRows.length + duplicates.filter((d) => d.action === "import").length} Transactions`}
+          {importing
+            ? (importStatus || "Importing…")
+            : `Import ${nonDuplicateRows.length + duplicates.filter((d) => d.action === "import").length} Transactions`}
           <ChevronRight className="w-4 h-4" />
         </Button>
       </div>
@@ -634,17 +637,17 @@ export default function ImportPage() {
   // ─── Import Execution ────────────────────────
   const handleImport = async () => {
     setImporting(true);
+    setImportStatus("Preparing rows…");
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    if (!user) { setImporting(false); return; }
 
-    // Merge clean rows + accepted duplicates
     const toImport = [
       ...nonDuplicateRows,
       ...duplicates.filter((d) => d.action === "import").map((d) => d.row),
     ];
     const skipped = duplicates.filter((d) => d.action === "skip").length;
 
-    // Create import batch
+    // Create import batch record
     const { data: batch } = await supabase
       .from("import_batches")
       .insert({
@@ -659,13 +662,12 @@ export default function ImportPage() {
       .select()
       .single();
 
-    if (!batch) {
-      setImporting(false);
-      return;
-    }
+    if (!batch) { setImporting(false); return; }
 
+    // Parse all rows into transaction objects in one JS pass (no API calls)
+    const accountCurrency = accounts.find((a) => a.id === selectedAccountId)?.currency || "SEK";
+    const txRows: Record<string, unknown>[] = [];
     const errors: typeof failedRows = [];
-    let successCount = 0;
 
     for (let i = 0; i < toImport.length; i++) {
       const rowObj = toImport[i];
@@ -673,7 +675,6 @@ export default function ImportPage() {
         const dateStr = rowObj[mapping.date_column] || "";
         const amtStr = rowObj[mapping.amount_column] || "";
         const desc = rowObj[mapping.description_column] || "";
-        // For XLSX Fakturadetaljer: combine description + location
         const location = isXlsxFormat ? (rowObj["Ort"] || "") : "";
         const fullDesc = location ? `${desc} — ${location}` : desc;
         const postedStr = isXlsxFormat ? (rowObj["Bokfört"] || "") : "";
@@ -684,17 +685,10 @@ export default function ImportPage() {
         if (isNaN(parsedDate.getTime())) throw new Error("Invalid date");
         const dateFormatted = parsedDate.toISOString().split("T")[0];
         const postedFormatted = postedStr ? new Date(postedStr).toISOString().split("T")[0] : null;
-
-        // For XLSX Fakturadetaljer the Belopp (col 6) is ALWAYS in the account's currency (SEK).
-        // The Valuta column shows the original purchase currency — do NOT use it as the stored
-        // currency or the same spend will appear to need conversion again later.
-        const accountCurrency = accounts.find((a) => a.id === selectedAccountId)?.currency || "SEK";
         const rowCurrency = isXlsxFormat ? "" : (rowObj["Valuta"] || "");
         const currency = rowCurrency || accountCurrency;
 
-        const txType = amt < 0 ? "income" : "expense";
-
-        await supabase.from("transactions").insert({
+        txRows.push({
           account_id: selectedAccountId,
           import_batch_id: batch.id,
           date: dateFormatted,
@@ -703,52 +697,55 @@ export default function ImportPage() {
           currency,
           description: fullDesc,
           raw_description: desc,
-          transaction_type: txType,
+          transaction_type: amt < 0 ? "income" : "expense",
         });
-        successCount++;
       } catch (err: any) {
         errors.push({ row: i + 1, reason: err.message || "Unknown error" });
       }
     }
 
-    // Update batch counts
+    // Single bulk insert — one API call instead of N
+    let successCount = txRows.length;
+    if (txRows.length > 0) {
+      setImportStatus(`Saving ${txRows.length} transactions…`);
+      const { error: insertError } = await supabase.from("transactions").insert(txRows);
+      if (insertError) {
+        errors.push({ row: 0, reason: insertError.message });
+        successCount = 0;
+      }
+    }
+
     await supabase
       .from("import_batches")
       .update({ imported_count: successCount, skipped_count: skipped })
       .eq("id", batch.id);
 
-    // Persist mapping for this account so next import auto-fills
     if (selectedAccountId && !isXlsxFormat) {
       saveMapping(selectedAccountId, mapping, false);
     }
 
-    // Apply auto-rules to newly imported transactions
+    // Apply auto-rules in bulk (one update per rule, not per transaction)
     try {
       const stored = localStorage.getItem("sq_auto_rules");
       const autoRules: { keyword: string; markShared: boolean; categoryId: string }[] = stored ? JSON.parse(stored) : [];
-      if (autoRules.length > 0) {
+      if (autoRules.length > 0 && successCount > 0) {
+        setImportStatus("Applying auto-rules…");
         const { data: newTxs } = await supabase
           .from("transactions")
           .select("id, description, category_id, is_shared")
           .eq("import_batch_id", batch.id);
         if (newTxs) {
-          for (const tx of newTxs) {
-            const desc = tx.description.toLowerCase();
-            for (const rule of autoRules) {
-              if (desc.includes(rule.keyword.toLowerCase())) {
-                const patch: Record<string, unknown> = {};
-                if (rule.markShared && !tx.is_shared) {
-                  patch.is_shared = true;
-                  patch.reimbursement_status = "pending";
-                }
-                if (rule.categoryId && !tx.category_id) {
-                  patch.category_id = rule.categoryId;
-                }
-                if (Object.keys(patch).length > 0) {
-                  await supabase.from("transactions").update(patch).eq("id", tx.id);
-                }
-                break;
-              }
+          for (const rule of autoRules) {
+            const kw = rule.keyword.toLowerCase();
+            const matchIds = newTxs
+              .filter((tx) => tx.description.toLowerCase().includes(kw))
+              .map((tx) => tx.id);
+            if (matchIds.length === 0) continue;
+            const patch: Record<string, unknown> = {};
+            if (rule.markShared) { patch.is_shared = true; patch.reimbursement_status = "pending"; }
+            if (rule.categoryId) patch.category_id = rule.categoryId;
+            if (Object.keys(patch).length > 0) {
+              await supabase.from("transactions").update(patch).in("id", matchIds);
             }
           }
         }
@@ -758,6 +755,7 @@ export default function ImportPage() {
     setImportedCount(successCount);
     setFailedRows(errors);
     setImporting(false);
+    setImportStatus("");
     setStep(4);
   };
 
