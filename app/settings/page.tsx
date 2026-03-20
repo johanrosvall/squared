@@ -113,11 +113,13 @@ export default function SettingsPage() {
     setSavingProfile(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
-      const { error } = await supabase.from("profiles").update({
+      const { error } = await supabase.from("profiles").upsert({
+        id: user.id,
+        email: user.email ?? profileEmail,
         name: profileName,
         default_currency: profileCurrency,
         date_format: profileDateFormat,
-      }).eq("id", user.id);
+      });
       if (error) toast("Failed to save profile", "error");
       else toast("Profile saved");
     }
