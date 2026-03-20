@@ -7,22 +7,29 @@ import {
   User,
   Users,
   Tag,
-  Shield,
+  Zap,
   Upload,
   Download,
   Plus,
   Trash2,
   Edit,
   Heart,
-  ToggleLeft,
-  ToggleRight,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Input, Select, useToast } from "@/components/ui";
 import { Badge } from "@/components/ui/Badge";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
-import type { Contact, Category, ReimbursementRule } from "@/lib/types";
+import type { Contact, Category } from "@/lib/types";
+
+interface AutoRule {
+  id: string;
+  keyword: string;
+  markShared: boolean;
+  categoryId: string;
+}
+
+const LS_RULES_KEY = "sq_auto_rules";
 
 type Section = "profile" | "contacts" | "categories" | "rules" | "import" | "export";
 
@@ -30,7 +37,7 @@ const sections: { id: Section; label: string; icon: React.ReactNode }[] = [
   { id: "profile", label: "Profile", icon: <User className="w-4 h-4" /> },
   { id: "contacts", label: "Contacts", icon: <Users className="w-4 h-4" /> },
   { id: "categories", label: "Categories", icon: <Tag className="w-4 h-4" /> },
-  { id: "rules", label: "Reimbursement Rules", icon: <Shield className="w-4 h-4" /> },
+  { id: "rules", label: "Auto Rules", icon: <Zap className="w-4 h-4" /> },
   { id: "import", label: "Import Settings", icon: <Upload className="w-4 h-4" /> },
   { id: "export", label: "Data Export", icon: <Download className="w-4 h-4" /> },
 ];
@@ -69,8 +76,11 @@ export default function SettingsPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [editingCategory, setEditingCategory] = useState<Partial<Category> | null>(null);
 
-  // Rules
-  const [rules, setRules] = useState<ReimbursementRule[]>([]);
+  // Auto rules (localStorage)
+  const [autoRules, setAutoRules] = useState<AutoRule[]>([]);
+  const [newKeyword, setNewKeyword] = useState("");
+  const [newRuleCategoryId, setNewRuleCategoryId] = useState("");
+  const [newRuleShared, setNewRuleShared] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -92,8 +102,10 @@ export default function SettingsPage() {
       const { data: cats } = await supabase.from("categories").select("*").order("name");
       if (cats) setCategories(cats);
 
-      const { data: rls } = await supabase.from("reimbursement_rules").select("*").order("created_at");
-      if (rls) setRules(rls);
+      try {
+        const stored = localStorage.getItem(LS_RULES_KEY);
+        if (stored) setAutoRules(JSON.parse(stored));
+      } catch { /* ignore */ }
     })();
   }, [supabase]);
 
@@ -187,10 +199,30 @@ export default function SettingsPage() {
     if (data) setCategories(data);
   };
 
-  // ─── Rule toggle ─────────────────────────────
-  const handleToggleRule = async (rule: ReimbursementRule) => {
-    await supabase.from("reimbursement_rules").update({ is_active: !rule.is_active }).eq("id", rule.id);
-    setRules((r) => r.map((x) => x.id === rule.id ? { ...x, is_active: !x.is_active } : x));
+  // ─── Auto rule CRUD ───────────────────────────
+  const saveAutoRules = (rules: AutoRule[]) => {
+    setAutoRules(rules);
+    try { localStorage.setItem(LS_RULES_KEY, JSON.stringify(rules)); } catch { /* ignore */ }
+  };
+
+  const handleAddRule = () => {
+    if (!newKeyword.trim()) return;
+    const rule: AutoRule = {
+      id: crypto.randomUUID(),
+      keyword: newKeyword.trim(),
+      markShared: newRuleShared,
+      categoryId: newRuleCategoryId,
+    };
+    saveAutoRules([...autoRules, rule]);
+    setNewKeyword("");
+    setNewRuleCategoryId("");
+    setNewRuleShared(false);
+    toast("Rule added");
+  };
+
+  const handleDeleteRule = (id: string) => {
+    saveAutoRules(autoRules.filter((r) => r.id !== id));
+    toast("Rule deleted");
   };
 
   // ─── Render sections ─────────────────────────
@@ -372,36 +404,95 @@ export default function SettingsPage() {
 
   const renderRules = () => (
     <div>
-      <div className="flex justify-between items-center mb-6">
-        <p className="font-sans text-[14px] text-sq-gray-600">
-          Auto-flag transactions as shared or requiring reimbursement.
-        </p>
-      </div>
-      {rules.length === 0 ? (
+      <p className="font-sans text-[14px] text-sq-gray-600 mb-6">
+        Rules are applied from the Transactions page. Each rule matches on description keyword (case-insensitive) and can auto-categorize and/or mark expenses as shared.
+      </p>
+
+      {/* Add new rule */}
+      <Card className="mb-6">
+        <div className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-black mb-4">New Rule</div>
+        <div className="grid grid-cols-3 gap-4 mb-4">
+          <div>
+            <label className="block sq-label mb-2">Keyword (description contains)</label>
+            <input
+              type="text"
+              value={newKeyword}
+              onChange={(e) => setNewKeyword(e.target.value)}
+              placeholder="e.g. ICA, Netflix, COOP"
+              className="w-full border-2 border-sq-black px-3 py-2 font-mono text-[13px] outline-none focus:border-sq-blue"
+            />
+          </div>
+          <div>
+            <label className="block sq-label mb-2">Auto-assign Category (optional)</label>
+            <select
+              value={newRuleCategoryId}
+              onChange={(e) => setNewRuleCategoryId(e.target.value)}
+              className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue"
+            >
+              <option value="">— no category —</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block sq-label mb-2">Mark as Shared</label>
+            <button
+              onClick={() => setNewRuleShared(!newRuleShared)}
+              className={cn(
+                "w-full border-2 py-2 font-sans font-semibold text-[12px] uppercase tracking-wider transition-colors",
+                newRuleShared ? "bg-amber-500 text-sq-white border-amber-500" : "border-sq-black text-sq-black hover:bg-sq-gray-100"
+              )}
+            >
+              {newRuleShared ? "Shared — Yes" : "Not Shared"}
+            </button>
+          </div>
+        </div>
+        <Button size="sm" onClick={handleAddRule} disabled={!newKeyword.trim()}>
+          <Plus className="w-3 h-3" /> Add Rule
+        </Button>
+      </Card>
+
+      {/* Rule list */}
+      {autoRules.length === 0 ? (
         <Card className="text-center py-8">
-          <Shield className="w-8 h-8 text-sq-gray-400 mx-auto mb-3" />
-          <p className="font-sans text-[14px] text-sq-gray-600">
-            No rules yet. Create rules from the transaction detail panel.
-          </p>
+          <Zap className="w-8 h-8 text-sq-gray-400 mx-auto mb-3" />
+          <p className="font-sans text-[14px] text-sq-gray-600">No rules yet. Add one above.</p>
         </Card>
       ) : (
-        <div className="space-y-3">
-          {rules.map((rule) => (
-            <Card key={rule.id} className={cn(!rule.is_active && "opacity-50")}>
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="font-sans font-bold text-[15px] text-sq-black">{rule.name}</div>
-                  <div className="font-mono text-[12px] text-sq-gray-600 mt-1">
-                    {rule.match_criteria.description_pattern && `Pattern: "${rule.match_criteria.description_pattern}"`}
-                    {rule.action.expected_reimbursement_percentage && ` • ${rule.action.expected_reimbursement_percentage}% reimbursement`}
-                  </div>
+        <div className="border border-sq-black">
+          <div className="grid grid-cols-12 gap-4 px-4 py-2 bg-sq-gray-100 border-b border-sq-black">
+            <div className="col-span-4 sq-label-muted">Keyword</div>
+            <div className="col-span-4 sq-label-muted">Category</div>
+            <div className="col-span-2 sq-label-muted">Shared</div>
+            <div className="col-span-2 sq-label-muted" />
+          </div>
+          {autoRules.map((rule) => {
+            const cat = categories.find((c) => c.id === rule.categoryId);
+            return (
+              <div key={rule.id} className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-sq-gray-100 items-center">
+                <div className="col-span-4 font-mono text-[13px] text-sq-black">{rule.keyword}</div>
+                <div className="col-span-4 font-sans text-[13px] text-sq-gray-600">
+                  {cat ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: cat.color || "#D4D4D4" }} />
+                      {cat.name}
+                    </span>
+                  ) : "—"}
                 </div>
-                <button onClick={() => handleToggleRule(rule)} className="text-sq-gray-600 hover:text-sq-black">
-                  {rule.is_active ? <ToggleRight className="w-6 h-6 text-sq-green" /> : <ToggleLeft className="w-6 h-6" />}
-                </button>
+                <div className="col-span-2 font-sans text-[12px]">
+                  {rule.markShared ? (
+                    <span className="text-amber-600 font-semibold">Yes</span>
+                  ) : "—"}
+                </div>
+                <div className="col-span-2 flex justify-end">
+                  <button onClick={() => handleDeleteRule(rule.id)} className="text-sq-gray-400 hover:text-sq-red">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
-            </Card>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

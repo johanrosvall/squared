@@ -10,7 +10,6 @@ import {
   Users,
   PiggyBank,
   History,
-  Scale,
   ArrowLeft,
   Archive,
   ArchiveRestore,
@@ -19,7 +18,7 @@ import {
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Input, Select, useToast } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatDate } from "@/lib/utils";
 import type { Account, AccountType, ImportBatch } from "@/lib/types";
 
 const accountTypeIcon: Record<string, React.ReactNode> = {
@@ -33,8 +32,7 @@ const accountTypeIcon: Record<string, React.ReactNode> = {
 type ViewState =
   | { mode: "gallery" }
   | { mode: "create" }
-  | { mode: "history"; accountId: string; accountName: string }
-  | { mode: "reconcile"; accountId: string; accountName: string };
+  | { mode: "history"; accountId: string; accountName: string };
 
 export default function AccountsPage() {
   const supabase = createClient();
@@ -51,11 +49,6 @@ export default function AccountsPage() {
 
   // Import history state
   const [batches, setBatches] = useState<ImportBatch[]>([]);
-
-  // Reconciliation state
-  const [actualBalance, setActualBalance] = useState("");
-  const [calculatedBalance, setCalculatedBalance] = useState(0);
-  const [txCount, setTxCount] = useState(0);
 
   const fetchAccounts = useCallback(async () => {
     const { data } = await supabase
@@ -97,18 +90,6 @@ export default function AccountsPage() {
       .eq("account_id", accountId)
       .order("import_date", { ascending: false });
     if (data) setBatches(data);
-  };
-
-  const loadReconciliation = async (accountId: string) => {
-    const { data } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("account_id", accountId);
-    if (data) {
-      const sum = data.reduce((acc, t) => acc + Number(t.amount), 0);
-      setCalculatedBalance(sum);
-      setTxCount(data.length);
-    }
   };
 
   const handleArchive = async (id: string) => {
@@ -166,11 +147,6 @@ export default function AccountsPage() {
                 onHistory={() => {
                   loadHistory(acct.id);
                   setView({ mode: "history", accountId: acct.id, accountName: acct.name });
-                }}
-                onReconcile={() => {
-                  loadReconciliation(acct.id);
-                  setActualBalance("");
-                  setView({ mode: "reconcile", accountId: acct.id, accountName: acct.name });
                 }}
                 onArchive={() => handleArchive(acct.id)}
               />
@@ -348,82 +324,11 @@ export default function AccountsPage() {
     );
   };
 
-  // ─── Reconciliation Tool View ────────────────
-  const renderReconcile = () => {
-    if (view.mode !== "reconcile") return null;
-    const actual = parseFloat(actualBalance.replace(/[^0-9.\-]/g, "")) || 0;
-    const variance = actual - calculatedBalance;
-    const hasVariance = actualBalance !== "" && Math.abs(variance) > 0.005;
-
-    return (
-      <div className="max-w-3xl">
-        <div className="flex items-center gap-4 mb-8">
-          <button onClick={() => setView({ mode: "gallery" })} className="text-sq-gray-600 hover:text-sq-black">
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          <h2 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">
-            Reconcile: {view.accountName}
-          </h2>
-        </div>
-
-        <div className="grid grid-cols-2 gap-8 mb-8">
-          <Card className="bg-sq-gray-100">
-            <div className="sq-label-muted mb-2">System Calculated Balance</div>
-            <div className="font-mono text-[36px] font-bold text-sq-black">
-              {formatCurrency(calculatedBalance)}
-            </div>
-            <div className="font-sans text-[13px] text-sq-gray-600 mt-2">
-              Based on {txCount} imported transactions
-            </div>
-          </Card>
-          <Card>
-            <div className="sq-label-muted mb-2">Actual Bank Balance</div>
-            <input
-              type="text"
-              value={actualBalance}
-              onChange={(e) => setActualBalance(e.target.value)}
-              placeholder="$0.00"
-              className="w-full bg-sq-white border-2 border-sq-black font-mono text-[36px] font-bold text-sq-black outline-none focus:border-sq-blue px-4 py-3"
-            />
-            <div className="font-sans text-[13px] text-sq-gray-600 mt-2">
-              Enter current balance from statement
-            </div>
-          </Card>
-        </div>
-
-        {hasVariance && (
-          <div className="border-2 border-sq-red p-6 bg-red-50 flex justify-between items-center mb-8">
-            <div>
-              <div className="font-sans font-bold text-[14px] uppercase tracking-widest text-sq-red mb-1">
-                Variance Detected
-              </div>
-              <div className="font-mono text-[24px] font-bold text-sq-red">
-                {formatCurrency(variance)}
-              </div>
-            </div>
-            <div className="text-right">
-              <p className="font-sans text-[15px] text-sq-black max-w-md mb-4">
-                The calculated balance does not match your statement. This may
-                indicate missing transactions or duplicates.
-              </p>
-              <Button variant="danger">Review Transactions</Button>
-            </div>
-          </div>
-        )}
-
-        <div className="flex justify-end">
-          <Button>Save Reconciliation</Button>
-        </div>
-      </div>
-    );
-  };
-
   return (
     <PageShell userName={userName}>
       {view.mode === "gallery" && renderGallery()}
       {view.mode === "create" && renderCreate()}
       {view.mode === "history" && renderHistory()}
-      {view.mode === "reconcile" && renderReconcile()}
     </PageShell>
   );
 }
@@ -432,12 +337,10 @@ export default function AccountsPage() {
 function AccountCard({
   account,
   onHistory,
-  onReconcile,
   onArchive,
 }: {
   account: Account;
   onHistory: () => void;
-  onReconcile: () => void;
   onArchive: () => void;
 }) {
   const icon = accountTypeIcon[account.type] || accountTypeIcon.other;
@@ -482,13 +385,6 @@ function AccountCard({
         >
           <History className="w-3 h-3" />
           History
-        </button>
-        <button
-          onClick={onReconcile}
-          className="flex-1 border-2 border-sq-black py-2 font-sans text-[11px] uppercase font-semibold text-sq-black hover:bg-sq-black hover:text-sq-white transition-colors flex items-center justify-center gap-1"
-        >
-          <Scale className="w-3 h-3" />
-          Reconcile
         </button>
       </div>
     </Card>

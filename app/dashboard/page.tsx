@@ -18,11 +18,14 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Card, Button, Badge } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate, pct, cn } from "@/lib/utils";
+import { buildRateMap, convert } from "@/lib/currency";
 import type { Transaction, Category, Account } from "@/lib/types";
 
 export default function DashboardPage() {
   const supabase = createClient();
   const [userName, setUserName] = useState("");
+  const [displayCurrency, setDisplayCurrency] = useState("SEK");
+  const [rateMap, setRateMap] = useState(new Map<string, number>());
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -32,6 +35,12 @@ export default function DashboardPage() {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) setUserName(user.user_metadata?.name || user.email || "");
+
+      // Load display currency from profile
+      if (user) {
+        const { data: profile } = await supabase.from("profiles").select("default_currency").eq("id", user.id).single();
+        if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
+      }
 
       // Fetch current month transactions
       const now = new Date();
@@ -45,7 +54,14 @@ export default function DashboardPage() {
         .gte("date", monthStart)
         .lt("date", monthEnd)
         .order("date", { ascending: false });
-      if (txs) setTransactions(txs);
+      if (txs) {
+        setTransactions(txs);
+        // Build rate map for any foreign-currency transactions
+        const dc = (await supabase.from("profiles").select("default_currency").eq("id", user?.id ?? "").single()).data?.default_currency || "SEK";
+        const rm = await buildRateMap(txs, dc);
+        setRateMap(rm);
+        setDisplayCurrency(dc);
+      }
 
       const { data: cats } = await supabase.from("categories").select("*");
       if (cats) setCategories(cats);
@@ -56,7 +72,7 @@ export default function DashboardPage() {
       // Calculate unsettled shared balance
       const { data: unsettled } = await supabase
         .from("transactions")
-        .select("amount")
+        .select("amount, currency, date")
         .eq("is_shared", true)
         .in("reimbursement_status", ["none", "pending", "partial"]);
       if (unsettled) {
@@ -69,10 +85,12 @@ export default function DashboardPage() {
   const expenses = transactions.filter((t) => t.amount > 0 && t.transaction_type === "expense");
   const incomes = transactions.filter((t) => t.amount < 0 || t.transaction_type === "income");
 
-  const totalSpending = expenses.reduce((s, t) => s + t.amount, 0);
-  const totalIncome = incomes.reduce((s, t) => s + Math.abs(t.amount), 0);
+  const cvt = (t: Transaction) => convert(t.amount, t.currency, t.date, displayCurrency, rateMap);
 
-  // Group spending by category
+  const totalSpending = expenses.reduce((s, t) => s + cvt(t), 0);
+  const totalIncome = incomes.reduce((s, t) => s + Math.abs(cvt(t)), 0);
+
+  // Group spending by category (converted)
   const spendingByCategory = new Map<string, { name: string; color: string; total: number }>();
   for (const tx of expenses) {
     const cat = tx.category as Category | undefined;
@@ -82,7 +100,7 @@ export default function DashboardPage() {
       color: cat?.color || "#D4D4D4",
       total: 0,
     };
-    existing.total += tx.amount;
+    existing.total += cvt(tx);
     spendingByCategory.set(key, existing);
   }
   const categoryList = Array.from(spendingByCategory.values()).sort((a, b) => b.total - a.total);
@@ -119,7 +137,7 @@ export default function DashboardPage() {
             <div>
               <div className="font-sans font-bold text-[14px] text-sq-black">Settle up with your partner</div>
               <div className="font-sans text-[13px] text-sq-gray-600">
-                You have {formatCurrency(Math.abs(unsettledBalance))} in unreimbursed shared expenses.
+                You have {formatCurrency(Math.abs(unsettledBalance), displayCurrency)} in unreimbursed shared expenses.
               </div>
             </div>
           </div>
@@ -139,14 +157,14 @@ export default function DashboardPage() {
           <Card>
             <div className="sq-label-muted mb-2">Total ({monthName.split(" ")[0]})</div>
             <div className="font-mono text-[32px] font-bold text-sq-red">
-              {formatCurrency(totalSpending)}
+              {formatCurrency(totalSpending, displayCurrency)}
             </div>
           </Card>
           {categoryList.slice(0, 3).map((cat) => (
             <Card key={cat.name}>
               <div className="sq-label-muted mb-2">{cat.name}</div>
               <div className="font-mono text-[28px] font-bold text-sq-black">
-                {formatCurrency(cat.total)}
+                {formatCurrency(cat.total, displayCurrency)}
               </div>
               <div className="font-sans text-[12px] text-sq-gray-600 mt-1">
                 {pct(cat.total, totalSpending)}
@@ -170,7 +188,7 @@ export default function DashboardPage() {
                   <span className="font-sans text-[14px] text-sq-black">{cat.name}</span>
                 </div>
                 <div className="col-span-3 text-right font-mono text-[14px] text-sq-black font-bold">
-                  {formatCurrency(cat.total)}
+                  {formatCurrency(cat.total, displayCurrency)}
                 </div>
                 <div className="col-span-3 text-right font-mono text-[14px] text-sq-gray-600">
                   {pct(cat.total, totalSpending)}
@@ -190,7 +208,7 @@ export default function DashboardPage() {
         <Card>
           <div className="sq-label-muted mb-2">Total Income ({monthName.split(" ")[0]})</div>
           <div className="font-mono text-[32px] font-bold text-sq-green">
-            {formatCurrency(totalIncome)}
+            {formatCurrency(totalIncome, displayCurrency)}
           </div>
         </Card>
         {incomes.length > 0 && (
@@ -204,7 +222,7 @@ export default function DashboardPage() {
               <div key={tx.id} className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
                 <div className="col-span-5 font-sans text-[14px] text-sq-black">{tx.description}</div>
                 <div className="col-span-4 text-right font-mono text-[14px] text-sq-green font-bold">
-                  {formatCurrency(Math.abs(tx.amount))}
+                  {formatCurrency(Math.abs(tx.amount), displayCurrency)}
                 </div>
                 <div className="col-span-3 text-right font-mono text-[13px] text-sq-gray-600">
                   {formatDate(tx.date)}
@@ -251,7 +269,7 @@ export default function DashboardPage() {
                     "col-span-2 text-right font-mono text-[14px] font-bold",
                     tx.amount < 0 ? "text-sq-green" : "text-sq-black"
                   )}>
-                    {formatCurrency(tx.amount)}
+                    {formatCurrency(tx.amount, displayCurrency)}
                   </div>
                 </div>
               );

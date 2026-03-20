@@ -8,6 +8,7 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Card } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, pct, cn } from "@/lib/utils";
+import { buildRateMap, convert } from "@/lib/currency";
 import type { Transaction, Category } from "@/lib/types";
 
 type Period = "this_month" | "last_3" | "last_6" | "this_year";
@@ -130,13 +131,19 @@ function TrendChart({ months }: { months: { label: string; spending: number; inc
 export default function AnalyticsPage() {
   const supabase = createClient();
   const [userName, setUserName] = useState("");
+  const [displayCurrency, setDisplayCurrency] = useState("SEK");
+  const [rateMap, setRateMap] = useState(new Map<string, number>());
   const [period, setPeriod] = useState<Period>("this_month");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) setUserName(user.user_metadata?.name || user.email || "");
+    supabase.auth.getUser().then(async ({ data: { user } }) => {
+      if (user) {
+        setUserName(user.user_metadata?.name || user.email || "");
+        const { data: profile } = await supabase.from("profiles").select("default_currency").eq("id", user.id).single();
+        if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
+      }
     });
   }, [supabase]);
 
@@ -149,11 +156,15 @@ export default function AnalyticsPage() {
       .gte("date", from)
       .lte("date", to)
       .order("date", { ascending: true })
-      .then(({ data }) => {
-        if (data) setTransactions(data);
+      .then(async ({ data }) => {
+        if (data) {
+          setTransactions(data);
+          const rm = await buildRateMap(data, displayCurrency);
+          setRateMap(rm);
+        }
         setLoading(false);
       });
-  }, [supabase, period]);
+  }, [supabase, period, displayCurrency]);
 
   const expenses = useMemo(
     () => transactions.filter((t) => t.amount > 0 && t.transaction_type === "expense"),
@@ -166,9 +177,11 @@ export default function AnalyticsPage() {
   const sharedExpenses = useMemo(() => expenses.filter((t) => t.is_shared), [expenses]);
   const personalExpenses = useMemo(() => expenses.filter((t) => !t.is_shared), [expenses]);
 
-  const totalSpending = useMemo(() => expenses.reduce((s, t) => s + t.amount, 0), [expenses]);
-  const totalIncome = useMemo(() => incomes.reduce((s, t) => s + Math.abs(t.amount), 0), [incomes]);
-  const totalShared = useMemo(() => sharedExpenses.reduce((s, t) => s + t.amount, 0), [sharedExpenses]);
+  const cvt = (t: Transaction) => convert(t.amount, t.currency, t.date, displayCurrency, rateMap);
+
+  const totalSpending = useMemo(() => expenses.reduce((s, t) => s + cvt(t), 0), [expenses, rateMap]);
+  const totalIncome = useMemo(() => incomes.reduce((s, t) => s + Math.abs(cvt(t)), 0), [incomes, rateMap]);
+  const totalShared = useMemo(() => sharedExpenses.reduce((s, t) => s + cvt(t), 0), [sharedExpenses, rateMap]);
 
   // Category breakdown
   const categoryBreakdown = useMemo(() => {
@@ -181,11 +194,11 @@ export default function AnalyticsPage() {
         color: cat?.color || "#D4D4D4",
         total: 0,
       };
-      entry.total += tx.amount;
+      entry.total += cvt(tx);
       map.set(key, entry);
     }
     return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [expenses]);
+  }, [expenses, rateMap]);
 
   // Monthly trend
   const monthlyTrend = useMemo(() => {
@@ -193,8 +206,9 @@ export default function AnalyticsPage() {
     for (const tx of transactions) {
       const label = tx.date.slice(0, 7); // YYYY-MM
       const entry = map.get(label) || { spending: 0, income: 0 };
-      if (tx.amount > 0 && tx.transaction_type === "expense") entry.spending += tx.amount;
-      if (tx.amount < 0 || tx.transaction_type === "income") entry.income += Math.abs(tx.amount);
+      const converted = cvt(tx);
+      if (tx.amount > 0 && tx.transaction_type === "expense") entry.spending += converted;
+      if (tx.amount < 0 || tx.transaction_type === "income") entry.income += Math.abs(converted);
       map.set(label, entry);
     }
     return Array.from(map.entries())
@@ -203,7 +217,7 @@ export default function AnalyticsPage() {
         label: new Date(key + "-01").toLocaleDateString("en-US", { month: "short" }),
         ...val,
       }));
-  }, [transactions]);
+  }, [transactions, rateMap]);
 
   const isEmpty = transactions.length === 0 && !loading;
 
@@ -249,21 +263,21 @@ export default function AnalyticsPage() {
               <div className="sq-label-muted mb-2 flex items-center gap-1">
                 <TrendingDown className="w-3 h-3 text-sq-red" /> Total Spending
               </div>
-              <div className="font-mono text-[28px] font-bold text-sq-red">{formatCurrency(totalSpending)}</div>
+              <div className="font-mono text-[28px] font-bold text-sq-red">{formatCurrency(totalSpending, displayCurrency)}</div>
               <div className="font-sans text-[12px] text-sq-gray-400 mt-1">{expenses.length} transactions</div>
             </Card>
             <Card>
               <div className="sq-label-muted mb-2 flex items-center gap-1">
                 <TrendingUp className="w-3 h-3 text-sq-green" /> Total Income
               </div>
-              <div className="font-mono text-[28px] font-bold text-sq-green">{formatCurrency(totalIncome)}</div>
+              <div className="font-mono text-[28px] font-bold text-sq-green">{formatCurrency(totalIncome, displayCurrency)}</div>
               <div className="font-sans text-[12px] text-sq-gray-400 mt-1">{incomes.length} transactions</div>
             </Card>
             <Card>
               <div className="sq-label-muted mb-2 flex items-center gap-1">
                 <Users className="w-3 h-3 text-amber-500" /> Shared Expenses
               </div>
-              <div className="font-mono text-[28px] font-bold text-sq-black">{formatCurrency(totalShared)}</div>
+              <div className="font-mono text-[28px] font-bold text-sq-black">{formatCurrency(totalShared, displayCurrency)}</div>
               <div className="font-sans text-[12px] text-sq-gray-400 mt-1">
                 {pct(totalShared, totalSpending)} of spending
               </div>
@@ -278,7 +292,7 @@ export default function AnalyticsPage() {
                   totalIncome - totalSpending >= 0 ? "text-sq-green" : "text-sq-red"
                 )}
               >
-                {formatCurrency(totalIncome - totalSpending)}
+                {formatCurrency(totalIncome - totalSpending, displayCurrency)}
               </div>
               <div className="font-sans text-[12px] text-sq-gray-400 mt-1">income minus spending</div>
             </Card>
@@ -321,7 +335,7 @@ export default function AnalyticsPage() {
                           <span className="font-sans text-[13px] text-sq-black">{cat.name}</span>
                         </div>
                         <div className="col-span-3 text-right font-mono text-[13px] text-sq-black font-bold">
-                          {formatCurrency(cat.total)}
+                          {formatCurrency(cat.total, displayCurrency)}
                         </div>
                         <div className="col-span-3 text-right font-mono text-[13px] text-sq-gray-600">
                           {pct(cat.total, totalSpending)}
@@ -356,7 +370,7 @@ export default function AnalyticsPage() {
                         <span className="font-sans text-[12px] text-sq-gray-400">({item.count} txns)</span>
                       </div>
                       <span className="font-mono font-bold text-[18px] text-sq-black">
-                        {formatCurrency(item.value)}
+                        {formatCurrency(item.value, displayCurrency)}
                       </span>
                     </div>
                     <div className="h-2 bg-sq-gray-100 border border-sq-gray-100">

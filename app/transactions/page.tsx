@@ -10,11 +10,8 @@ import {
   CreditCard,
   Users,
   Heart,
-  X,
-  ArrowRightLeft,
+  Zap,
   Tag,
-  StickyNote,
-  ExternalLink,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Badge, Modal, Select, useToast } from "@/components/ui";
@@ -56,6 +53,106 @@ export default function TransactionsPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedTxId, setSelectedTxId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const [applyingRules, setApplyingRules] = useState(false);
+
+  // ─── Auto-categorize ──────────────────────────
+  const handleAutoCategorize = async () => {
+    setApplyingRules(true);
+    // Fetch all categorized transactions to build a description → category map
+    const { data: categorized } = await supabase
+      .from("transactions")
+      .select("description, category_id")
+      .not("category_id", "is", null);
+
+    if (!categorized || categorized.length === 0) {
+      toast("No categorized transactions to learn from", "info");
+      setApplyingRules(false);
+      return;
+    }
+
+    // Build frequency map: description (lowercase) → most common category_id
+    const freq = new Map<string, Map<string, number>>();
+    for (const tx of categorized) {
+      const key = tx.description.toLowerCase().trim();
+      if (!freq.has(key)) freq.set(key, new Map());
+      const m = freq.get(key)!;
+      m.set(tx.category_id, (m.get(tx.category_id) || 0) + 1);
+    }
+    const descToCategory = new Map<string, string>();
+    freq.forEach((counts, desc) => {
+      const best = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0];
+      descToCategory.set(desc, best[0]);
+    });
+
+    // Find uncategorized transactions in current view and apply matches
+    const uncategorized = transactions.filter((t) => !t.category_id);
+    const descToCatEntries = Array.from(descToCategory.entries());
+    let updated = 0;
+    for (const tx of uncategorized) {
+      const key = tx.description.toLowerCase().trim();
+      // Exact match first
+      let catId = descToCategory.get(key);
+      // Substring match: check if any known description is contained in this one or vice versa
+      if (!catId) {
+        for (const [desc, cId] of descToCatEntries) {
+          if (key.includes(desc) || desc.includes(key)) {
+            catId = cId;
+            break;
+          }
+        }
+      }
+      if (catId) {
+        await supabase.from("transactions").update({ category_id: catId }).eq("id", tx.id);
+        updated++;
+      }
+    }
+
+    toast(updated > 0 ? `Auto-categorized ${updated} transactions` : "No new matches found", updated > 0 ? "success" : "info");
+    setApplyingRules(false);
+    fetchTransactions();
+  };
+
+  // ─── Apply sharing rules ──────────────────────
+  const handleApplyRules = async () => {
+    let rules: { id: string; keyword: string; markShared: boolean; categoryId: string }[] = [];
+    try {
+      const stored = localStorage.getItem("sq_auto_rules");
+      if (stored) rules = JSON.parse(stored);
+    } catch { /* ignore */ }
+
+    if (rules.length === 0) {
+      toast("No rules defined. Add rules in Settings → Auto Rules.", "info");
+      return;
+    }
+
+    setApplyingRules(true);
+    let updated = 0;
+    for (const tx of transactions) {
+      const desc = tx.description.toLowerCase();
+      for (const rule of rules) {
+        if (desc.includes(rule.keyword.toLowerCase())) {
+          const patch: Record<string, unknown> = {};
+          if (rule.markShared && !tx.is_shared) {
+            patch.is_shared = true;
+            patch.reimbursement_status = "pending";
+          }
+          if (rule.categoryId && !tx.category_id) {
+            patch.category_id = rule.categoryId;
+          }
+          if (Object.keys(patch).length > 0) {
+            await supabase.from("transactions").update(patch).eq("id", tx.id);
+            updated++;
+          }
+          break; // first matching rule wins
+        }
+      }
+    }
+
+    toast(updated > 0 ? `Applied rules to ${updated} transactions` : "No changes needed", updated > 0 ? "success" : "info");
+    setApplyingRules(false);
+    fetchTransactions();
+  };
 
   // CC Bill modal
   const [ccModalOpen, setCcModalOpen] = useState(false);
@@ -399,11 +496,29 @@ export default function TransactionsPage() {
       {/* Filter bar */}
       {filtersOpen && <div className="-mx-12">{renderFilters()}</div>}
 
-      {/* Transaction count */}
+      {/* Transaction count + actions */}
       <div className="flex justify-between items-center py-4">
         <span className="font-mono text-[13px] text-sq-gray-600">
           {loading ? "Loading…" : `${transactions.length} transactions`}
         </span>
+        <div className="flex gap-3">
+          <button
+            onClick={handleAutoCategorize}
+            disabled={applyingRules || loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 border-2 border-sq-black font-sans font-semibold text-[11px] uppercase tracking-wider text-sq-black hover:bg-sq-gray-100 disabled:opacity-40 transition-colors"
+          >
+            <Tag className="w-3 h-3" />
+            Auto-categorize
+          </button>
+          <button
+            onClick={handleApplyRules}
+            disabled={applyingRules || loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 border-2 border-sq-black font-sans font-semibold text-[11px] uppercase tracking-wider text-sq-black hover:bg-sq-gray-100 disabled:opacity-40 transition-colors"
+          >
+            <Zap className="w-3 h-3" />
+            Apply Rules
+          </button>
+        </div>
       </div>
 
       {/* Transaction list */}

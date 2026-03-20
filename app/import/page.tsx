@@ -685,9 +685,12 @@ export default function ImportPage() {
         const dateFormatted = parsedDate.toISOString().split("T")[0];
         const postedFormatted = postedStr ? new Date(postedStr).toISOString().split("T")[0] : null;
 
-        // For XLSX: use the currency from the row, fall back to account currency
-        const rowCurrency = isXlsxFormat ? (rowObj["Valuta"] || "") : "";
-        const currency = rowCurrency || accounts.find((a) => a.id === selectedAccountId)?.currency || "SEK";
+        // For XLSX Fakturadetaljer the Belopp (col 6) is ALWAYS in the account's currency (SEK).
+        // The Valuta column shows the original purchase currency — do NOT use it as the stored
+        // currency or the same spend will appear to need conversion again later.
+        const accountCurrency = accounts.find((a) => a.id === selectedAccountId)?.currency || "SEK";
+        const rowCurrency = isXlsxFormat ? "" : (rowObj["Valuta"] || "");
+        const currency = rowCurrency || accountCurrency;
 
         const txType = amt < 0 ? "income" : "expense";
 
@@ -718,6 +721,39 @@ export default function ImportPage() {
     if (selectedAccountId && !isXlsxFormat) {
       saveMapping(selectedAccountId, mapping, false);
     }
+
+    // Apply auto-rules to newly imported transactions
+    try {
+      const stored = localStorage.getItem("sq_auto_rules");
+      const autoRules: { keyword: string; markShared: boolean; categoryId: string }[] = stored ? JSON.parse(stored) : [];
+      if (autoRules.length > 0) {
+        const { data: newTxs } = await supabase
+          .from("transactions")
+          .select("id, description, category_id, is_shared")
+          .eq("import_batch_id", batch.id);
+        if (newTxs) {
+          for (const tx of newTxs) {
+            const desc = tx.description.toLowerCase();
+            for (const rule of autoRules) {
+              if (desc.includes(rule.keyword.toLowerCase())) {
+                const patch: Record<string, unknown> = {};
+                if (rule.markShared && !tx.is_shared) {
+                  patch.is_shared = true;
+                  patch.reimbursement_status = "pending";
+                }
+                if (rule.categoryId && !tx.category_id) {
+                  patch.category_id = rule.categoryId;
+                }
+                if (Object.keys(patch).length > 0) {
+                  await supabase.from("transactions").update(patch).eq("id", tx.id);
+                }
+                break;
+              }
+            }
+          }
+        }
+      }
+    } catch { /* ignore rule errors */ }
 
     setImportedCount(successCount);
     setFailedRows(errors);
