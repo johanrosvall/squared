@@ -70,15 +70,20 @@ export default function AccountsPage() {
     setCreating(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-    await supabase.from("accounts").insert({
+    const { error } = await supabase.from("accounts").insert({
       user_id: user.id,
       name: newName.trim(),
       type: newType,
       currency: newCurrency,
     });
+    setCreating(false);
+    if (error) {
+      toast(`Failed to create account: ${error.message}`, "error");
+      return;
+    }
     setNewName("");
     setNewType("checking");
-    setCreating(false);
+    toast("Account created");
     await fetchAccounts();
     setView({ mode: "gallery" });
   };
