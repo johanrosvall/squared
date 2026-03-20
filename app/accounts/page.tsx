@@ -9,15 +9,15 @@ import {
   CreditCard,
   Users,
   PiggyBank,
-  MoreVertical,
   History,
   Scale,
   ArrowLeft,
-  AlertTriangle,
+  Archive,
+  ArchiveRestore,
   Trash2,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
-import { Button, Card, Input, Select } from "@/components/ui";
+import { Button, Card, Input, Select, useToast } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Account, AccountType, ImportBatch } from "@/lib/types";
@@ -38,6 +38,7 @@ type ViewState =
 
 export default function AccountsPage() {
   const supabase = createClient();
+  const { toast } = useToast();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [view, setView] = useState<ViewState>({ mode: "gallery" });
   const [userName, setUserName] = useState("");
@@ -60,7 +61,6 @@ export default function AccountsPage() {
     const { data } = await supabase
       .from("accounts")
       .select("*")
-      .eq("is_active", true)
       .order("created_at");
     if (data) setAccounts(data);
   }, [supabase]);
@@ -111,50 +111,121 @@ export default function AccountsPage() {
     }
   };
 
-  // ─── Gallery View ────────────────────────────
-  const renderGallery = () => (
-    <div>
-      <div className="flex justify-between items-end mb-8">
-        <h2 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">
-          Accounts
-        </h2>
-        <Button onClick={() => setView({ mode: "create" })}>
-          <Plus className="w-4 h-4" />
-          Add Account
-        </Button>
-      </div>
+  const handleArchive = async (id: string) => {
+    await supabase.from("accounts").update({ is_active: false }).eq("id", id);
+    toast("Account archived");
+    fetchAccounts();
+  };
 
-      {accounts.length === 0 ? (
-        <Card className="text-center py-16">
-          <p className="font-sans text-sq-gray-600 text-[15px] mb-4">
-            No accounts yet. Create your first account to get started.
-          </p>
+  const handleUnarchive = async (id: string) => {
+    await supabase.from("accounts").update({ is_active: true }).eq("id", id);
+    toast("Account restored");
+    fetchAccounts();
+  };
+
+  const handleDelete = async (id: string, name: string) => {
+    if (!confirm(`Permanently delete "${name}"?\n\nThis will also delete ALL transactions imported to this account. This cannot be undone.`)) return;
+    await supabase.from("accounts").delete().eq("id", id);
+    toast("Account deleted");
+    fetchAccounts();
+  };
+
+  // ─── Gallery View ────────────────────────────
+  const renderGallery = () => {
+    const active = accounts.filter((a) => a.is_active);
+    const archived = accounts.filter((a) => !a.is_active);
+
+    return (
+      <div>
+        <div className="flex justify-between items-end mb-8">
+          <h2 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">
+            Accounts
+          </h2>
           <Button onClick={() => setView({ mode: "create" })}>
             <Plus className="w-4 h-4" />
             Add Account
           </Button>
-        </Card>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {accounts.map((acct) => (
-            <AccountCard
-              key={acct.id}
-              account={acct}
-              onHistory={() => {
-                loadHistory(acct.id);
-                setView({ mode: "history", accountId: acct.id, accountName: acct.name });
-              }}
-              onReconcile={() => {
-                loadReconciliation(acct.id);
-                setActualBalance("");
-                setView({ mode: "reconcile", accountId: acct.id, accountName: acct.name });
-              }}
-            />
-          ))}
         </div>
-      )}
-    </div>
-  );
+
+        {active.length === 0 ? (
+          <Card className="text-center py-16 mb-8">
+            <p className="font-sans text-sq-gray-600 text-[15px] mb-4">
+              No active accounts. Create your first account to get started.
+            </p>
+            <Button onClick={() => setView({ mode: "create" })}>
+              <Plus className="w-4 h-4" />
+              Add Account
+            </Button>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-12">
+            {active.map((acct) => (
+              <AccountCard
+                key={acct.id}
+                account={acct}
+                onHistory={() => {
+                  loadHistory(acct.id);
+                  setView({ mode: "history", accountId: acct.id, accountName: acct.name });
+                }}
+                onReconcile={() => {
+                  loadReconciliation(acct.id);
+                  setActualBalance("");
+                  setView({ mode: "reconcile", accountId: acct.id, accountName: acct.name });
+                }}
+                onArchive={() => handleArchive(acct.id)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* ─── Archived Accounts ─── */}
+        {archived.length > 0 && (
+          <div>
+            <h3 className="font-sans font-extrabold text-[18px] text-sq-gray-600 uppercase tracking-tight mb-4 flex items-center gap-2">
+              <Archive className="w-4 h-4" />
+              Archived ({archived.length})
+            </h3>
+            <div className="border border-sq-gray-100">
+              {archived.map((acct) => (
+                <div
+                  key={acct.id}
+                  className="flex items-center justify-between px-6 py-4 border-b border-sq-gray-100 last:border-b-0"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 border border-sq-gray-400 flex items-center justify-center opacity-40">
+                      {accountTypeIcon[acct.type] || accountTypeIcon.other}
+                    </div>
+                    <div>
+                      <div className="font-sans font-semibold text-[15px] text-sq-gray-600">{acct.name}</div>
+                      <div className="font-sans text-[11px] uppercase tracking-widest text-sq-gray-400">
+                        {acct.type.replace("_", " ")} · {acct.currency}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleUnarchive(acct.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 border border-sq-gray-400 font-sans text-[11px] uppercase font-semibold text-sq-gray-600 hover:border-sq-black hover:text-sq-black transition-colors"
+                    >
+                      <ArchiveRestore className="w-3 h-3" />
+                      Restore
+                    </button>
+                    <button
+                      onClick={() => handleDelete(acct.id, acct.name)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 border border-sq-gray-400 font-sans text-[11px] uppercase font-semibold text-sq-gray-600 hover:border-sq-red hover:text-sq-red transition-colors"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   // ─── Create Account View ─────────────────────
   const renderCreate = () => (
@@ -362,10 +433,12 @@ function AccountCard({
   account,
   onHistory,
   onReconcile,
+  onArchive,
 }: {
   account: Account;
   onHistory: () => void;
   onReconcile: () => void;
+  onArchive: () => void;
 }) {
   const icon = accountTypeIcon[account.type] || accountTypeIcon.other;
 
@@ -383,6 +456,13 @@ function AccountCard({
             </div>
           </div>
         </div>
+        <button
+          onClick={onArchive}
+          title="Archive account"
+          className="text-sq-gray-400 hover:text-sq-gray-600 transition-colors"
+        >
+          <Archive className="w-4 h-4" />
+        </button>
       </div>
 
       <div className="mb-4">
