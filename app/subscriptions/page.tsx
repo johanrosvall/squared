@@ -8,7 +8,7 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Card, Button } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import type { Transaction } from "@/lib/types";
+import type { Transaction, Category } from "@/lib/types";
 
 const LS_KEY = "sq_sub_overrides";
 
@@ -118,6 +118,7 @@ export default function SubscriptionsPage() {
   const [userName, setUserName] = useState("");
   const [displayCurrency, setDisplayCurrency] = useState("SEK");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
@@ -143,16 +144,42 @@ export default function SubscriptionsPage() {
           .single();
         if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
       }
-      const { data } = await supabase
-        .from("transactions")
-        .select("*")
-        .order("date", { ascending: true });
-      if (data) setTransactions(data);
+      const [{ data: txData }, { data: catData }] = await Promise.all([
+        supabase.from("transactions").select("*").order("date", { ascending: true }),
+        supabase.from("categories").select("*").order("name"),
+      ]);
+      if (txData) setTransactions(txData);
+      if (catData) setCategories(catData);
       setLoading(false);
     })();
   }, [supabase]);
 
   const subscriptions = useMemo(() => detectSubs(transactions), [transactions]);
+
+  // Monthly equivalent cost per subscription (normalise all frequencies to /month)
+  const monthlyEquivalent = (sub: DetectedSub) => sub.averageAmount * (30 / sub.intervalDays);
+
+  // Category breakdown: sum monthly equivalent costs, grouping by the most common category_id in each sub
+  const categoryBreakdown = useMemo(() => {
+    const totals = new Map<string | null, number>();
+    for (const sub of subscriptions) {
+      // Find most common category_id among the sub's transactions
+      const freq = new Map<string | null, number>();
+      for (const tx of sub.transactions) {
+        freq.set(tx.category_id, (freq.get(tx.category_id) ?? 0) + 1);
+      }
+      let topCat: string | null = null;
+      let topCount = 0;
+      for (const [cid, cnt] of Array.from(freq.entries())) {
+        if (cnt > topCount) { topCount = cnt; topCat = cid; }
+      }
+      totals.set(topCat, (totals.get(topCat) ?? 0) + monthlyEquivalent(sub));
+    }
+    return Array.from(totals.entries())
+      .map(([catId, monthly]) => ({ catId, monthly }))
+      .sort((a, b) => b.monthly - a.monthly);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscriptions]);
 
   const isOverdue = (nextExpected: string) => new Date(nextExpected) < new Date();
 
@@ -219,7 +246,52 @@ export default function SubscriptionsPage() {
           </p>
         </Card>
       ) : (
-        <div className="border-2 border-sq-black">
+        <>
+          {/* Monthly cost by category */}
+          {categoryBreakdown.length > 0 && (
+            <div className="mb-8">
+              <h2 className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-gray-600 mb-3">
+                Monthly Cost by Category
+              </h2>
+              <div className="border-2 border-sq-black">
+                {categoryBreakdown.map(({ catId, monthly }) => {
+                  const cat = catId ? categories.find((c) => c.id === catId) : null;
+                  return (
+                    <div
+                      key={catId ?? "__none__"}
+                      className="flex items-center justify-between px-5 py-3 border-b border-sq-gray-100 last:border-0"
+                    >
+                      <span className="flex items-center gap-2 font-sans text-[14px] text-sq-black">
+                        {cat ? (
+                          <>
+                            <span
+                              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
+                              style={{ backgroundColor: cat.color || "#D4D4D4" }}
+                            />
+                            {cat.name}
+                          </>
+                        ) : (
+                          <span className="text-sq-gray-400">Uncategorized</span>
+                        )}
+                      </span>
+                      <span className="font-mono text-[14px] font-bold text-sq-red">
+                        {formatCurrency(monthly, displayCurrency)}<span className="font-sans text-[11px] font-normal text-sq-gray-400">/mo</span>
+                      </span>
+                    </div>
+                  );
+                })}
+                {/* Total row */}
+                <div className="flex items-center justify-between px-5 py-3 bg-sq-gray-100 border-t-2 border-sq-black">
+                  <span className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-black">Total</span>
+                  <span className="font-mono text-[15px] font-bold text-sq-red">
+                    {formatCurrency(categoryBreakdown.reduce((s, r) => s + r.monthly, 0), displayCurrency)}<span className="font-sans text-[11px] font-normal text-sq-gray-400">/mo</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="border-2 border-sq-black">
           {/* Header */}
           <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-sq-gray-100 border-b border-sq-black">
             <div className="col-span-4 sq-label-muted">Name</div>
@@ -360,6 +432,7 @@ export default function SubscriptionsPage() {
             );
           })}
         </div>
+        </>
       )}
     </PageShell>
   );

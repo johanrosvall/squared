@@ -14,6 +14,8 @@ import {
   Trash2,
   Edit,
   Heart,
+  Check,
+  X,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Input, Select, useToast } from "@/components/ui";
@@ -66,6 +68,7 @@ export default function SettingsPage() {
   const [profileEmail, setProfileEmail] = useState("");
   const [profileCurrency, setProfileCurrency] = useState("USD");
   const [profileDateFormat, setProfileDateFormat] = useState("MM/DD/YYYY");
+  const [dupSensitivity, setDupSensitivity] = useState<"strict" | "loose">("strict");
   const [savingProfile, setSavingProfile] = useState(false);
 
   // Contacts
@@ -105,6 +108,8 @@ export default function SettingsPage() {
       try {
         const stored = localStorage.getItem(LS_RULES_KEY);
         if (stored) setAutoRules(JSON.parse(stored));
+        const sens = localStorage.getItem("sq_dup_sensitivity");
+        if (sens === "strict" || sens === "loose") setDupSensitivity(sens);
       } catch { /* ignore */ }
     })();
   }, [supabase]);
@@ -228,6 +233,27 @@ export default function SettingsPage() {
   const handleDeleteRule = (id: string) => {
     saveAutoRules(autoRules.filter((r) => r.id !== id));
     toast("Rule deleted");
+  };
+
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+  const [editRuleKeyword, setEditRuleKeyword] = useState("");
+  const [editRuleCategoryId, setEditRuleCategoryId] = useState("");
+  const [editRuleShared, setEditRuleShared] = useState(false);
+
+  const startEditRule = (rule: AutoRule) => {
+    setEditingRuleId(rule.id);
+    setEditRuleKeyword(rule.keyword);
+    setEditRuleCategoryId(rule.categoryId);
+    setEditRuleShared(rule.markShared);
+  };
+
+  const handleSaveRule = (id: string) => {
+    if (!editRuleKeyword.trim()) return;
+    saveAutoRules(autoRules.map((r) =>
+      r.id === id ? { ...r, keyword: editRuleKeyword.trim(), categoryId: editRuleCategoryId, markShared: editRuleShared } : r
+    ));
+    setEditingRuleId(null);
+    toast("Rule updated");
   };
 
   // ─── Render sections ─────────────────────────
@@ -491,6 +517,49 @@ export default function SettingsPage() {
           </div>
           {autoRules.map((rule) => {
             const cat = categories.find((c) => c.id === rule.categoryId);
+            const isEditingThis = editingRuleId === rule.id;
+            if (isEditingThis) {
+              return (
+                <div key={rule.id} className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-sq-gray-100 items-center bg-sq-gray-100">
+                  <div className="col-span-4">
+                    <input
+                      autoFocus
+                      value={editRuleKeyword}
+                      onChange={(e) => setEditRuleKeyword(e.target.value)}
+                      className="w-full border-2 border-sq-black px-2 py-1 font-mono text-[13px] outline-none focus:border-sq-blue bg-white"
+                    />
+                  </div>
+                  <div className="col-span-4">
+                    <select
+                      value={editRuleCategoryId}
+                      onChange={(e) => setEditRuleCategoryId(e.target.value)}
+                      className="w-full border-2 border-sq-black px-2 py-1 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
+                    >
+                      <option value="">— no category —</option>
+                      {categories.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-span-2">
+                    <button
+                      onClick={() => setEditRuleShared(!editRuleShared)}
+                      className={`border-2 px-2 py-1 font-sans text-[11px] uppercase font-semibold transition-colors ${editRuleShared ? "bg-amber-500 text-white border-amber-500" : "border-sq-black text-sq-black hover:bg-sq-gray-100"}`}
+                    >
+                      {editRuleShared ? "Yes" : "No"}
+                    </button>
+                  </div>
+                  <div className="col-span-2 flex justify-end gap-2">
+                    <button onClick={() => handleSaveRule(rule.id)} className="text-sq-blue hover:text-sq-black" title="Save">
+                      <Check className="w-4 h-4" />
+                    </button>
+                    <button onClick={() => setEditingRuleId(null)} className="text-sq-gray-400 hover:text-sq-black" title="Cancel">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              );
+            }
             return (
               <div key={rule.id} className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-sq-gray-100 items-center">
                 <div className="col-span-4 font-mono text-[13px] text-sq-black">{rule.keyword}</div>
@@ -507,8 +576,11 @@ export default function SettingsPage() {
                     <span className="text-amber-600 font-semibold">Yes</span>
                   ) : "—"}
                 </div>
-                <div className="col-span-2 flex justify-end">
-                  <button onClick={() => handleDeleteRule(rule.id)} className="text-sq-gray-400 hover:text-sq-red">
+                <div className="col-span-2 flex justify-end gap-2">
+                  <button onClick={() => startEditRule(rule)} className="text-sq-gray-400 hover:text-sq-black" title="Edit">
+                    <Edit className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => handleDeleteRule(rule.id)} className="text-sq-gray-400 hover:text-sq-red" title="Delete">
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
@@ -534,9 +606,24 @@ export default function SettingsPage() {
       />
       <div className="mb-6">
         <label className="block sq-label mb-2">Duplicate Detection Sensitivity</label>
+        <p className="font-sans text-[12px] text-sq-gray-600 mb-3">
+          <strong>Strict</strong>: matches on date + amount + description (recommended).<br />
+          <strong>Loose</strong>: matches on date + amount only — catches duplicates with slightly different descriptions.
+        </p>
         <div className="flex gap-4">
-          {["strict", "loose"].map((s) => (
-            <button key={s} className="flex-1 border-2 border-sq-black py-3 font-sans font-semibold text-[13px] uppercase tracking-wider hover:bg-sq-gray-100">
+          {(["strict", "loose"] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => {
+                setDupSensitivity(s);
+                try { localStorage.setItem("sq_dup_sensitivity", s); } catch { /* ignore */ }
+              }}
+              className={`flex-1 border-2 py-3 font-sans font-semibold text-[13px] uppercase tracking-wider transition-colors ${
+                dupSensitivity === s
+                  ? "bg-sq-black text-sq-white border-sq-black"
+                  : "border-sq-black text-sq-black hover:bg-sq-gray-100"
+              }`}
+            >
               {s}
             </button>
           ))}

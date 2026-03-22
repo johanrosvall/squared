@@ -27,11 +27,13 @@ export default function ImportPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState("");
 
-  // Step 1: File
+  // Step 1: File(s)
   const [csvText, setCsvText] = useState("");
   const [fileName, setFileName] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<string[][]>([]);
+  // Extra files beyond the first (same mapping applied to all)
+  const [extraFiles, setExtraFiles] = useState<{ name: string; rows: string[][] }[]>([]);
 
   // Step 2: Mapping
   const [mapping, setMapping] = useState<CsvColumnMapping>({
@@ -111,14 +113,61 @@ export default function ImportPage() {
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setFileName(file.name);
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    setExtraFiles([]);
     setSavedMappingLoaded(false);
 
-    const isXlsx = /\.(xlsx|xls)$/i.test(file.name);
+    const [first, ...rest] = files;
+    setFileName(files.length > 1 ? `${files.length} files selected` : first.name);
+
+    const parseExtra = (extraList: File[]) => {
+      const results: { name: string; rows: string[][] }[] = [];
+      let done = 0;
+      if (extraList.length === 0) return;
+      extraList.forEach((f) => {
+        const isX = /\.(xlsx|xls)$/i.test(f.name);
+        if (isX) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const wb = XLSX.read(ev.target?.result, { type: "array" });
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as (string | number)[][];
+            const txRows = allRows.filter((row) => {
+              const dateStr = String(row[0] || "");
+              const amount = row[6];
+              return /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && typeof amount === "number";
+            });
+            const r = txRows.map((row) => [String(row[0]), String(row[1]), String(row[2]), String(row[3]), String(row[4] || "SEK"), String(row[6])]);
+            results.push({ name: f.name, rows: r });
+            if (++done === extraList.length) setExtraFiles([...results]);
+          };
+          reader.readAsArrayBuffer(f);
+        } else {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            const text = ev.target?.result as string;
+            const lines = text.split(/\r?\n/).filter((l) => l.trim());
+            if (lines.length < 2) { if (++done === extraList.length) setExtraFiles([...results]); return; }
+            const sep = [";", ",", "\t"].reduce((best, s) => {
+              const count = (lines[0].split(s).length + lines[1].split(s).length) / 2;
+              const bestCount = (lines[0].split(best).length + lines[1].split(best).length) / 2;
+              return count > bestCount ? s : best;
+            }, ",");
+            const parseLine = (line: string) => line.split(sep).map((c) => c.trim().replace(/^"|"$/g, ""));
+            results.push({ name: f.name, rows: lines.slice(1).map(parseLine) });
+            if (++done === extraList.length) setExtraFiles([...results]);
+          };
+          reader.readAsText(f);
+        }
+      });
+    };
+
+    const isXlsx = /\.(xlsx|xls)$/i.test(first.name);
     if (isXlsx) {
-      parseXLSX(file);
+      parseXLSX(first);
+      if (rest.length > 0) parseExtra(rest);
     } else {
       setIsXlsxFormat(false);
       const reader = new FileReader();
@@ -126,8 +175,9 @@ export default function ImportPage() {
         const text = ev.target?.result as string;
         setCsvText(text);
         parseCSV(text);
+        if (rest.length > 0) parseExtra(rest);
       };
-      reader.readAsText(file);
+      reader.readAsText(first);
     }
   };
 
@@ -313,6 +363,7 @@ export default function ImportPage() {
             type="file"
             accept=".csv,.tsv,.txt,.xlsx,.xls"
             className="hidden"
+            multiple
             onChange={handleFileSelect}
           />
         </label>
@@ -347,6 +398,20 @@ export default function ImportPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {extraFiles.length > 0 && (
+        <div className="mb-6">
+          <div className="sq-label-muted mb-2">Additional files ({extraFiles.length}) — same mapping will be applied</div>
+          <div className="border border-sq-black divide-y divide-sq-gray-100">
+            {extraFiles.map((f) => (
+              <div key={f.name} className="flex justify-between px-4 py-2 font-sans text-[13px]">
+                <span className="font-mono text-sq-black">{f.name}</span>
+                <span className="text-sq-gray-600">{f.rows.length} rows</span>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -498,21 +563,33 @@ export default function ImportPage() {
 
   // ─── Duplicate Detection ─────────────────────
   const handleCheckDuplicates = async () => {
-    // Build row objects
-    const allRowObjs = rows.map((row) => {
-      const obj: Record<string, string> = {};
-      headers.forEach((h, i) => (obj[h] = row[i] || ""));
-      return obj;
-    });
+    // Build row objects from first file + all extra files (same headers/mapping)
+    const allRowObjs = [
+      ...rows.map((row) => {
+        const obj: Record<string, string> = { __file__: fileName };
+        headers.forEach((h, i) => (obj[h] = row[i] || ""));
+        return obj;
+      }),
+      ...extraFiles.flatMap(({ name, rows: extraRows }) =>
+        extraRows.map((row) => {
+          const obj: Record<string, string> = { __file__: name };
+          headers.forEach((h, i) => (obj[h] = row[i] || ""));
+          return obj;
+        })
+      ),
+    ];
 
     // Fetch existing transactions for this account
     const { data: existing } = await supabase
       .from("transactions")
       .select("*")
       .eq("account_id", selectedAccountId);
+    const sensitivity = (() => { try { return localStorage.getItem("sq_dup_sensitivity") || "strict"; } catch { return "strict"; } })();
     const existingFingerprints = new Map<string, Transaction>();
     (existing || []).forEach((t: Transaction) => {
-      const fp = transactionFingerprint(t.date, Number(t.amount), t.description);
+      const fp = sensitivity === "loose"
+        ? `${t.date}|${Number(t.amount)}`
+        : transactionFingerprint(t.date, Number(t.amount), t.description);
       existingFingerprints.set(fp, t);
     });
 
@@ -523,13 +600,20 @@ export default function ImportPage() {
       const dateStr = rowObj[mapping.date_column] || "";
       const amtStr = rowObj[mapping.amount_column] || "";
       const desc = rowObj[mapping.description_column] || "";
-      let amt = parseFloat(amtStr.replace(/[^0-9.\-]/g, ""));
+      // Match fullDesc exactly as handleImport stores it (xlsx appends location)
+      const location = isXlsxFormat ? (rowObj["Ort"] || "") : "";
+      const fullDesc = location ? `${desc} — ${location}` : desc;
+      let amt = parseFloat(String(amtStr).replace(/[^0-9.\-]/g, ""));
       if (isNaN(amt)) continue;
       if (mapping.amount_sign === "invert") amt = -amt;
       const parsedDate = new Date(dateStr);
       if (isNaN(parsedDate.getTime())) continue;
       const dateFormatted = parsedDate.toISOString().split("T")[0];
-      const fp = transactionFingerprint(dateFormatted, amt, desc);
+      // Use loose matching if sensitivity is set to "loose" (match on date+amount only)
+      const sensitivity = (() => { try { return localStorage.getItem("sq_dup_sensitivity") || "strict"; } catch { return "strict"; } })();
+      const fp = sensitivity === "loose"
+        ? `${dateFormatted}|${amt}`
+        : transactionFingerprint(dateFormatted, amt, fullDesc);
 
       if (existingFingerprints.has(fp)) {
         dupes.push({ row: rowObj, existing: existingFingerprints.get(fp)!, action: "skip" });
@@ -647,119 +731,116 @@ export default function ImportPage() {
     ];
     const skipped = duplicates.filter((d) => d.action === "skip").length;
 
-    // Create import batch record
-    const { data: batch } = await supabase
-      .from("import_batches")
-      .insert({
-        user_id: user.id,
-        account_id: selectedAccountId,
-        file_name: fileName,
-        file_hash: "",
-        raw_row_count: rows.length,
-        imported_count: 0,
-        skipped_count: skipped,
-      })
-      .select()
-      .single();
+    // Group rows by source file for per-file batch records
+    const fileGroups = new Map<string, Record<string, string>[]>();
+    const primaryName = extraFiles.length > 0 ? (toImport[0]?.__file__ || fileName) : fileName;
+    for (const row of toImport) {
+      const name = row.__file__ || primaryName;
+      if (!fileGroups.has(name)) fileGroups.set(name, []);
+      fileGroups.get(name)!.push(row);
+    }
+    // If no __file__ tag (single-file flow), use the primary file name
+    if (fileGroups.size === 0) fileGroups.set(fileName, toImport);
 
-    if (!batch) { setImporting(false); return; }
-
-    // Parse all rows into transaction objects in one JS pass (no API calls)
     const accountCurrency = accounts.find((a) => a.id === selectedAccountId)?.currency || "SEK";
-    const txRows: Record<string, unknown>[] = [];
-    const errors: typeof failedRows = [];
-
-    // Descriptions to always skip (CC payment-received rows that aren't real expenses)
     const SKIP_DESCRIPTIONS = ["inbetalning"];
+    const errors: typeof failedRows = [];
+    let totalSuccess = 0;
 
-    for (let i = 0; i < toImport.length; i++) {
-      const rowObj = toImport[i];
-      try {
-        const dateStr = rowObj[mapping.date_column] || "";
-        const amtStr = rowObj[mapping.amount_column] || "";
-        const desc = rowObj[mapping.description_column] || "";
+    const fileEntries = Array.from(fileGroups.entries());
+    for (let fi = 0; fi < fileEntries.length; fi++) {
+      const [fName, fRows] = fileEntries[fi];
+      setImportStatus(`Importing file ${fi + 1}/${fileEntries.length}: ${fName}…`);
 
-        // Skip known CC payment-received entries
-        if (SKIP_DESCRIPTIONS.some((skip) => desc.toLowerCase().trim() === skip.toLowerCase())) continue;
-
-        const location = isXlsxFormat ? (rowObj["Ort"] || "") : "";
-        const fullDesc = location ? `${desc} — ${location}` : desc;
-        const postedStr = isXlsxFormat ? (rowObj["Bokfört"] || "") : "";
-        let amt = parseFloat(String(amtStr).replace(/[^0-9.\-]/g, ""));
-        if (isNaN(amt)) throw new Error("Invalid amount");
-        if (mapping.amount_sign === "invert") amt = -amt;
-        const parsedDate = new Date(dateStr);
-        if (isNaN(parsedDate.getTime())) throw new Error("Invalid date");
-        const dateFormatted = parsedDate.toISOString().split("T")[0];
-        const postedFormatted = postedStr ? new Date(postedStr).toISOString().split("T")[0] : null;
-        const rowCurrency = isXlsxFormat ? "" : (rowObj["Valuta"] || "");
-        const currency = rowCurrency || accountCurrency;
-
-        txRows.push({
+      // Create batch record for this file
+      const { data: batch } = await supabase
+        .from("import_batches")
+        .insert({
+          user_id: user.id,
           account_id: selectedAccountId,
-          import_batch_id: batch.id,
-          date: dateFormatted,
-          posted_date: postedFormatted || (mapping.date_type === "posted" ? dateFormatted : null),
-          amount: amt,
-          currency,
-          description: fullDesc,
-          raw_description: desc,
-          transaction_type: amt < 0 ? "income" : "expense",
-        });
-      } catch (err: any) {
-        errors.push({ row: i + 1, reason: err.message || "Unknown error" });
+          file_name: fName,
+          file_hash: "",
+          raw_row_count: fRows.length,
+          imported_count: 0,
+          skipped_count: fi === 0 ? skipped : 0,
+        })
+        .select()
+        .single();
+
+      if (!batch) continue;
+
+      const txRows: Record<string, unknown>[] = [];
+
+      for (let i = 0; i < fRows.length; i++) {
+        const rowObj = fRows[i];
+        try {
+          const dateStr = rowObj[mapping.date_column] || "";
+          const amtStr = rowObj[mapping.amount_column] || "";
+          const desc = rowObj[mapping.description_column] || "";
+
+          if (SKIP_DESCRIPTIONS.some((skip) => desc.toLowerCase().trim() === skip.toLowerCase())) continue;
+
+          const location = isXlsxFormat ? (rowObj["Ort"] || "") : "";
+          const fullDesc = location ? `${desc} — ${location}` : desc;
+          const postedStr = isXlsxFormat ? (rowObj["Bokfört"] || "") : "";
+          let amt = parseFloat(String(amtStr).replace(/[^0-9.\-]/g, ""));
+          if (isNaN(amt)) throw new Error("Invalid amount");
+          if (mapping.amount_sign === "invert") amt = -amt;
+          const parsedDate = new Date(dateStr);
+          if (isNaN(parsedDate.getTime())) throw new Error("Invalid date");
+          const dateFormatted = parsedDate.toISOString().split("T")[0];
+          const postedFormatted = postedStr ? new Date(postedStr).toISOString().split("T")[0] : null;
+          const rowCurrency = isXlsxFormat ? "" : (rowObj["Valuta"] || "");
+
+          txRows.push({
+            account_id: selectedAccountId,
+            import_batch_id: batch.id,
+            date: dateFormatted,
+            posted_date: postedFormatted || (mapping.date_type === "posted" ? dateFormatted : null),
+            amount: amt,
+            currency: rowCurrency || accountCurrency,
+            description: fullDesc,
+            raw_description: desc,
+            transaction_type: amt < 0 ? "income" : "expense",
+          });
+        } catch (err: any) {
+          errors.push({ row: i + 1, reason: err.message || "Unknown error" });
+        }
       }
-    }
 
-    // Single bulk insert — one API call instead of N
-    let successCount = txRows.length;
-    if (txRows.length > 0) {
-      setImportStatus(`Saving ${txRows.length} transactions…`);
-      const { error: insertError } = await supabase.from("transactions").insert(txRows);
-      if (insertError) {
-        errors.push({ row: 0, reason: insertError.message });
-        successCount = 0;
+      let successCount = txRows.length;
+      if (txRows.length > 0) {
+        const { error: insertError } = await supabase.from("transactions").insert(txRows);
+        if (insertError) { errors.push({ row: 0, reason: `${fName}: ${insertError.message}` }); successCount = 0; }
       }
-    }
 
-    await supabase
-      .from("import_batches")
-      .update({ imported_count: successCount, skipped_count: skipped })
-      .eq("id", batch.id);
+      await supabase.from("import_batches").update({ imported_count: successCount }).eq("id", batch.id);
+      totalSuccess += successCount;
 
-    if (selectedAccountId && !isXlsxFormat) {
-      saveMapping(selectedAccountId, mapping, false);
-    }
-
-    // Apply auto-rules in bulk (one update per rule, not per transaction)
-    try {
-      const stored = localStorage.getItem("sq_auto_rules");
-      const autoRules: { keyword: string; markShared: boolean; categoryId: string }[] = stored ? JSON.parse(stored) : [];
-      if (autoRules.length > 0 && successCount > 0) {
-        setImportStatus("Applying auto-rules…");
-        const { data: newTxs } = await supabase
-          .from("transactions")
-          .select("id, description, category_id, is_shared")
-          .eq("import_batch_id", batch.id);
-        if (newTxs) {
-          for (const rule of autoRules) {
-            const kw = rule.keyword.toLowerCase();
-            const matchIds = newTxs
-              .filter((tx) => tx.description.toLowerCase().includes(kw))
-              .map((tx) => tx.id);
-            if (matchIds.length === 0) continue;
-            const patch: Record<string, unknown> = {};
-            if (rule.markShared) { patch.is_shared = true; patch.reimbursement_status = "pending"; }
-            if (rule.categoryId) patch.category_id = rule.categoryId;
-            if (Object.keys(patch).length > 0) {
-              await supabase.from("transactions").update(patch).in("id", matchIds);
+      // Apply auto-rules for this batch
+      try {
+        const stored = localStorage.getItem("sq_auto_rules");
+        const autoRules: { keyword: string; markShared: boolean; categoryId: string }[] = stored ? JSON.parse(stored) : [];
+        if (autoRules.length > 0 && successCount > 0) {
+          const { data: newTxs } = await supabase.from("transactions").select("id, description").eq("import_batch_id", batch.id);
+          if (newTxs) {
+            for (const rule of autoRules) {
+              const kw = rule.keyword.toLowerCase();
+              const matchIds = newTxs.filter((tx) => tx.description.toLowerCase().includes(kw)).map((tx) => tx.id);
+              if (matchIds.length === 0) continue;
+              const patch: Record<string, unknown> = {};
+              if (rule.markShared) { patch.is_shared = true; patch.reimbursement_status = "pending"; }
+              if (rule.categoryId) patch.category_id = rule.categoryId;
+              if (Object.keys(patch).length > 0) await supabase.from("transactions").update(patch).in("id", matchIds);
             }
           }
         }
-      }
-    } catch { /* ignore rule errors */ }
+      } catch { /* ignore */ }
+    }
 
-    setImportedCount(successCount);
+    if (selectedAccountId && !isXlsxFormat) saveMapping(selectedAccountId, mapping, false);
+
+    setImportedCount(totalSuccess);
     setFailedRows(errors);
     setImporting(false);
     setImportStatus("");
@@ -799,7 +880,7 @@ export default function ImportPage() {
       )}
 
       <div className="flex justify-center gap-4">
-        <Button variant="secondary" onClick={() => { setStep(1); setCsvText(""); setFileName(""); setHeaders([]); setRows([]); setSavedMappingLoaded(false); }}>
+        <Button variant="secondary" onClick={() => { setStep(1); setCsvText(""); setFileName(""); setHeaders([]); setRows([]); setExtraFiles([]); setSavedMappingLoaded(false); }}>
           Import Another File
         </Button>
         <Button onClick={() => (window.location.href = "/transactions")}>

@@ -12,11 +12,13 @@ import {
   Heart,
   Zap,
   Tag,
+  Copy,
+  Trash2,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Badge, Modal, Select, useToast } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
-import { formatCurrency, formatDate, cn } from "@/lib/utils";
+import { formatCurrency, formatDate, cn, transactionFingerprint } from "@/lib/utils";
 import type { Transaction, Account, Category, CreditCardBill, Contact } from "@/lib/types";
 
 type ViewMode = "unified" | "perAccount";
@@ -57,6 +59,11 @@ export default function TransactionsPage() {
 
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [applyingRules, setApplyingRules] = useState(false);
+
+  // Duplicate finder
+  const [dupFinderOpen, setDupFinderOpen] = useState(false);
+  const [dupGroups, setDupGroups] = useState<Transaction[][]>([]);
+  const [deletingDups, setDeletingDups] = useState(false);
 
   // ─── Auto-categorize ──────────────────────────
   const handleAutoCategorize = async () => {
@@ -156,6 +163,43 @@ export default function TransactionsPage() {
     fetchTransactions();
   };
 
+  // ─── Duplicate Finder ────────────────────────
+  const handleFindDuplicates = () => {
+    const sensitivity = (() => { try { return localStorage.getItem("sq_dup_sensitivity") || "strict"; } catch { return "strict"; } })();
+    const groups = new Map<string, Transaction[]>();
+    for (const tx of transactions) {
+      const fp = sensitivity === "loose"
+        ? `${tx.date}|${tx.amount}`
+        : transactionFingerprint(tx.date, tx.amount, tx.description);
+      if (!groups.has(fp)) groups.set(fp, []);
+      groups.get(fp)!.push(tx);
+    }
+    const dupes = Array.from(groups.values()).filter((g) => g.length > 1);
+    setDupGroups(dupes);
+    setDupFinderOpen(true);
+  };
+
+  const handleDeleteDuplicate = async (txId: string) => {
+    setDeletingDups(true);
+    await supabase.from("transactions").delete().eq("id", txId);
+    setDupGroups((prev) =>
+      prev.map((g) => g.filter((t) => t.id !== txId)).filter((g) => g.length > 1)
+    );
+    setDeletingDups(false);
+    fetchTransactions();
+  };
+
+  const handleDeleteAllButFirst = async (group: Transaction[]) => {
+    setDeletingDups(true);
+    const toDelete = group.slice(1).map((t) => t.id);
+    await supabase.from("transactions").delete().in("id", toDelete);
+    setDupGroups((prev) =>
+      prev.map((g) => (g[0].id === group[0].id ? [g[0]] : g)).filter((g) => g.length > 1)
+    );
+    setDeletingDups(false);
+    fetchTransactions();
+  };
+
   // CC Bill modal
   const [ccModalOpen, setCcModalOpen] = useState(false);
   const [ccModalTxId, setCcModalTxId] = useState<string | null>(null);
@@ -190,7 +234,7 @@ export default function TransactionsPage() {
     setLoading(true);
     let query = supabase
       .from("transactions")
-      .select("*")
+      .select("*, category:categories(*), account:accounts!account_id(*)")
       .order("date", { ascending: false });
 
     if (filters.dateFrom) query = query.gte("date", filters.dateFrom);
@@ -570,6 +614,14 @@ export default function TransactionsPage() {
             <Zap className="w-3 h-3" />
             Apply Rules
           </button>
+          <button
+            onClick={handleFindDuplicates}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 border-2 border-sq-red font-sans font-semibold text-[11px] uppercase tracking-wider text-sq-red hover:bg-red-50 disabled:opacity-40 transition-colors"
+          >
+            <Copy className="w-3 h-3" />
+            Find Duplicates
+          </button>
         </div>
       </div>
 
@@ -607,6 +659,63 @@ export default function TransactionsPage() {
           })
         )}
       </div>
+
+      {/* Duplicate Finder Modal */}
+      <Modal isOpen={dupFinderOpen} onClose={() => setDupFinderOpen(false)} title="Duplicate Transactions">
+        {dupGroups.length === 0 ? (
+          <div className="text-center py-8">
+            <p className="font-sans font-semibold text-[15px] text-sq-black mb-1">No duplicates found!</p>
+            <p className="font-sans text-[13px] text-sq-gray-600">All {transactions.length} transactions appear unique.</p>
+          </div>
+        ) : (
+          <div>
+            <p className="font-sans text-[13px] text-sq-gray-600 mb-4">
+              Found {dupGroups.length} group{dupGroups.length !== 1 ? "s" : ""} of duplicate transactions.
+              Keep the first occurrence and delete the rest, or remove individually.
+            </p>
+            <div className="space-y-4 max-h-[60vh] overflow-y-auto">
+              {dupGroups.map((group, gi) => (
+                <div key={gi} className="border-2 border-sq-black">
+                  <div className="flex justify-between items-center px-4 py-2 bg-sq-gray-100 border-b border-sq-black">
+                    <span className="font-sans text-[12px] font-semibold text-sq-black uppercase tracking-wider">
+                      {group[0].description} · {formatDate(group[0].date)} · {formatCurrency(Math.abs(group[0].amount), group[0].currency || displayCurrency)}
+                    </span>
+                    <button
+                      onClick={() => handleDeleteAllButFirst(group)}
+                      disabled={deletingDups}
+                      className="font-sans text-[11px] font-semibold uppercase tracking-wider text-sq-red hover:underline disabled:opacity-40"
+                    >
+                      Keep first, delete {group.length - 1} duplicate{group.length - 1 !== 1 ? "s" : ""}
+                    </button>
+                  </div>
+                  {group.map((tx, ti) => (
+                    <div key={tx.id} className="flex justify-between items-center px-4 py-2 border-b border-sq-gray-100 last:border-0">
+                      <div className="flex items-center gap-3">
+                        {ti === 0 && (
+                          <span className="font-sans text-[10px] uppercase tracking-wider text-sq-green font-semibold border border-sq-green px-1.5 py-0.5">Keep</span>
+                        )}
+                        <span className="font-mono text-[12px] text-sq-gray-600">{formatDate(tx.date)}</span>
+                        <span className="font-sans text-[13px] text-sq-black truncate max-w-[200px]">{tx.description}</span>
+                        <span className="font-mono text-[13px] font-bold text-sq-red">{formatCurrency(Math.abs(tx.amount), tx.currency || displayCurrency)}</span>
+                      </div>
+                      {ti > 0 && (
+                        <button
+                          onClick={() => handleDeleteDuplicate(tx.id)}
+                          disabled={deletingDups}
+                          className="text-sq-gray-400 hover:text-sq-red disabled:opacity-40 transition-colors"
+                          title="Delete this duplicate"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* CC Bill Modal */}
       <Modal isOpen={ccModalOpen} onClose={() => setCcModalOpen(false)} title="CC Bill Reconciliation">
