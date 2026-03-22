@@ -669,12 +669,19 @@ export default function ImportPage() {
     const txRows: Record<string, unknown>[] = [];
     const errors: typeof failedRows = [];
 
+    // Descriptions to always skip (CC payment-received rows that aren't real expenses)
+    const SKIP_DESCRIPTIONS = ["inbetalning"];
+
     for (let i = 0; i < toImport.length; i++) {
       const rowObj = toImport[i];
       try {
         const dateStr = rowObj[mapping.date_column] || "";
         const amtStr = rowObj[mapping.amount_column] || "";
         const desc = rowObj[mapping.description_column] || "";
+
+        // Skip known CC payment-received entries
+        if (SKIP_DESCRIPTIONS.some((skip) => desc.toLowerCase().trim() === skip.toLowerCase())) continue;
+
         const location = isXlsxFormat ? (rowObj["Ort"] || "") : "";
         const fullDesc = location ? `${desc} — ${location}` : desc;
         const postedStr = isXlsxFormat ? (rowObj["Bokfört"] || "") : "";
