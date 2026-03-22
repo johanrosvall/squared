@@ -180,7 +180,8 @@ export default function TransactionsPage() {
       if (cats) setCategories(cats);
       const { data: bills } = await supabase.from("credit_card_bills").select("*");
       if (bills) setCcBills(bills);
-      const { data: cts } = await supabase.from("contacts").select("*");
+      const { data: cts, error: ctsErr } = await supabase.from("contacts").select("*");
+      console.log("contacts loaded:", cts, "error:", ctsErr);
       if (cts) setContacts(cts);
     })();
   }, [supabase]);
