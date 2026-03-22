@@ -3,12 +3,31 @@
 export const dynamic = "force-dynamic";
 
 import React, { useState, useEffect, useMemo } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Pencil, EyeOff, Eye, Check, X } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
-import { Card } from "@/components/ui";
+import { Card, Button } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Transaction } from "@/lib/types";
+
+const LS_KEY = "sq_sub_overrides";
+
+interface SubOverride {
+  customName: string;
+  notes: string;
+  hidden: boolean;
+}
+
+function loadOverrides(): Record<string, SubOverride> {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function saveOverrides(overrides: Record<string, SubOverride>) {
+  localStorage.setItem(LS_KEY, JSON.stringify(overrides));
+}
 
 interface DetectedSub {
   description: string;
@@ -35,7 +54,7 @@ function addDays(dateStr: string, days: number): string {
 function detectSubs(transactions: Transaction[]): DetectedSub[] {
   const groups = new Map<string, Transaction[]>();
   for (const tx of transactions) {
-    if (tx.amount <= 0) continue; // expenses only (positive = expense in our schema)
+    if (tx.amount <= 0) continue;
     const key = tx.description.toLowerCase().trim();
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(tx);
@@ -48,7 +67,6 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
 
     const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
 
-    // Compute day intervals between consecutive occurrences
     const intervals: number[] = [];
     for (let i = 1; i < sorted.length; i++) {
       intervals.push(daysBetween(sorted[i - 1].date, sorted[i].date));
@@ -59,20 +77,17 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
       intervals.reduce((acc, v) => acc + Math.pow(v - meanInterval, 2), 0) / intervals.length
     );
 
-    // Reject if intervals are too irregular (allow more slack with more data)
     if (stdDev > meanInterval * 0.4 && txs.length < 4) continue;
 
-    // Classify into known frequencies
     let frequency: string;
     let intervalDays: number;
-    if (meanInterval >= 6 && meanInterval <= 9)        { frequency = "Weekly";    intervalDays = 7; }
-    else if (meanInterval >= 12 && meanInterval <= 16) { frequency = "Biweekly";  intervalDays = 14; }
-    else if (meanInterval >= 25 && meanInterval <= 45) { frequency = "Monthly";   intervalDays = 30; }
-    else if (meanInterval >= 80 && meanInterval <= 100){ frequency = "Quarterly"; intervalDays = 90; }
-    else if (meanInterval >= 340 && meanInterval <= 390){ frequency = "Annual";   intervalDays = 365; }
+    if (meanInterval >= 6 && meanInterval <= 9)         { frequency = "Weekly";    intervalDays = 7; }
+    else if (meanInterval >= 12 && meanInterval <= 16)  { frequency = "Biweekly";  intervalDays = 14; }
+    else if (meanInterval >= 25 && meanInterval <= 45)  { frequency = "Monthly";   intervalDays = 30; }
+    else if (meanInterval >= 80 && meanInterval <= 100) { frequency = "Quarterly"; intervalDays = 90; }
+    else if (meanInterval >= 340 && meanInterval <= 390){ frequency = "Annual";    intervalDays = 365; }
     else continue;
 
-    // Reject if amounts vary too wildly
     const amounts = sorted.map((t) => Math.abs(t.amount));
     const avgAmount = amounts.reduce((a, b) => a + b, 0) / amounts.length;
     const amountStdDev = Math.sqrt(
@@ -105,8 +120,18 @@ export default function SubscriptionsPage() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
+
+  // Overrides: keyed by original description
+  const [overrides, setOverrides] = useState<Record<string, SubOverride>>({});
+
+  // Edit state
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editNotes, setEditNotes] = useState("");
 
   useEffect(() => {
+    setOverrides(loadOverrides());
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
@@ -129,8 +154,37 @@ export default function SubscriptionsPage() {
 
   const subscriptions = useMemo(() => detectSubs(transactions), [transactions]);
 
-  const isOverdue = (nextExpected: string) =>
-    new Date(nextExpected) < new Date();
+  const isOverdue = (nextExpected: string) => new Date(nextExpected) < new Date();
+
+  const getOverride = (desc: string): SubOverride =>
+    overrides[desc] ?? { customName: "", notes: "", hidden: false };
+
+  const patchOverride = (desc: string, patch: Partial<SubOverride>) => {
+    const updated = { ...overrides, [desc]: { ...getOverride(desc), ...patch } };
+    setOverrides(updated);
+    saveOverrides(updated);
+  };
+
+  const startEdit = (desc: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const ov = getOverride(desc);
+    setEditName(ov.customName);
+    setEditNotes(ov.notes);
+    setEditing(desc);
+  };
+
+  const saveEdit = (desc: string) => {
+    patchOverride(desc, { customName: editName.trim(), notes: editNotes.trim() });
+    setEditing(null);
+  };
+
+  const toggleHidden = (desc: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    patchOverride(desc, { hidden: !getOverride(desc).hidden });
+  };
+
+  const visible = subscriptions.filter((s) => showHidden || !getOverride(s.description).hidden);
+  const hiddenCount = subscriptions.filter((s) => getOverride(s.description).hidden).length;
 
   return (
     <PageShell userName={userName}>
@@ -138,8 +192,19 @@ export default function SubscriptionsPage() {
         <h1 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">
           Subscriptions
         </h1>
-        <div className="font-sans text-[13px] text-sq-gray-600">
-          {subscriptions.length} detected
+        <div className="flex items-center gap-4">
+          {hiddenCount > 0 && (
+            <button
+              onClick={() => setShowHidden(!showHidden)}
+              className="flex items-center gap-1.5 font-sans text-[12px] uppercase font-semibold text-sq-gray-600 hover:text-sq-black transition-colors"
+            >
+              {showHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              {showHidden ? "Hide" : `Show ${hiddenCount} hidden`}
+            </button>
+          )}
+          <div className="font-sans text-[13px] text-sq-gray-600">
+            {visible.length} subscription{visible.length !== 1 ? "s" : ""}
+          </div>
         </div>
       </div>
 
@@ -164,48 +229,118 @@ export default function SubscriptionsPage() {
             <div className="col-span-2 text-right sq-label-muted">Next Expected</div>
           </div>
 
-          {subscriptions.map((sub) => (
-            <div key={sub.description}>
-              <div
-                onClick={() => setExpanded(expanded === sub.description ? null : sub.description)}
-                className="grid grid-cols-12 gap-4 px-6 py-4 border-b border-sq-gray-100 items-center cursor-pointer hover:bg-sq-gray-100 transition-colors"
-              >
-                <div className="col-span-4 flex items-center gap-2">
-                  {expanded === sub.description
-                    ? <ChevronDown className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
-                    : <ChevronRight className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
-                  }
-                  <span className="font-sans font-semibold text-[14px] text-sq-black truncate">
-                    {sub.description}
-                  </span>
-                </div>
+          {visible.map((sub) => {
+            const ov = getOverride(sub.description);
+            const displayName = ov.customName || sub.description;
+            const isHidden = ov.hidden;
+            const isEditing = editing === sub.description;
+            const isExpanded = expanded === sub.description;
 
-                <div className="col-span-2">
-                  <span className="font-sans text-[11px] uppercase tracking-wider font-semibold text-sq-blue border border-sq-blue px-2 py-0.5">
-                    {sub.frequency}
-                  </span>
-                </div>
-
-                <div className="col-span-2 text-right font-mono text-[14px] font-bold text-sq-red">
-                  {formatCurrency(sub.averageAmount, displayCurrency)}
-                </div>
-
-                <div className="col-span-2 text-right font-mono text-[14px] text-sq-black">
-                  {formatCurrency(sub.totalSpent, displayCurrency)}
-                </div>
-
-                <div className={`col-span-2 text-right font-sans text-[13px] ${isOverdue(sub.nextExpected) ? "text-sq-red font-semibold" : "text-sq-gray-600"}`}>
-                  {formatDate(sub.nextExpected)}
-                  {isOverdue(sub.nextExpected) && <span className="ml-1 text-[11px]">(due)</span>}
-                </div>
-              </div>
-
-              {expanded === sub.description && (
-                <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
-                  <div className="sq-label-muted mb-3">
-                    {sub.occurrences} charges · last on {formatDate(sub.lastDate)}
+            return (
+              <div key={sub.description} className={isHidden ? "opacity-40" : ""}>
+                {/* Main row */}
+                <div
+                  onClick={() => !isEditing && setExpanded(isExpanded ? null : sub.description)}
+                  className="grid grid-cols-12 gap-4 px-6 py-4 border-b border-sq-gray-100 items-center cursor-pointer hover:bg-sq-gray-100 transition-colors"
+                >
+                  <div className="col-span-4 flex items-center gap-2 min-w-0">
+                    {isExpanded
+                      ? <ChevronDown className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
+                      : <ChevronRight className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
+                    }
+                    <div className="min-w-0">
+                      <div className="font-sans font-semibold text-[14px] text-sq-black truncate">
+                        {displayName}
+                      </div>
+                      {ov.customName && (
+                        <div className="font-sans text-[11px] text-sq-gray-400 truncate">
+                          {sub.description}
+                        </div>
+                      )}
+                      {ov.notes && (
+                        <div className="font-sans text-[11px] text-sq-gray-600 truncate italic">
+                          {ov.notes}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="space-y-0">
+
+                  <div className="col-span-2">
+                    <span className="font-sans text-[11px] uppercase tracking-wider font-semibold text-sq-blue border border-sq-blue px-2 py-0.5">
+                      {sub.frequency}
+                    </span>
+                  </div>
+
+                  <div className="col-span-2 text-right font-mono text-[14px] font-bold text-sq-red">
+                    {formatCurrency(sub.averageAmount, displayCurrency)}
+                  </div>
+
+                  <div className="col-span-2 text-right font-mono text-[14px] text-sq-black">
+                    {formatCurrency(sub.totalSpent, displayCurrency)}
+                  </div>
+
+                  <div className="col-span-2 flex items-center justify-end gap-2">
+                    <span className={`font-sans text-[13px] ${isOverdue(sub.nextExpected) ? "text-sq-red font-semibold" : "text-sq-gray-600"}`}>
+                      {formatDate(sub.nextExpected)}
+                    </span>
+                    <button
+                      onClick={(e) => startEdit(sub.description, e)}
+                      className="text-sq-gray-400 hover:text-sq-black transition-colors flex-shrink-0"
+                      title="Edit"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={(e) => toggleHidden(sub.description, e)}
+                      className="text-sq-gray-400 hover:text-sq-black transition-colors flex-shrink-0"
+                      title={isHidden ? "Show" : "Hide"}
+                    >
+                      {isHidden ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Edit panel */}
+                {isEditing && (
+                  <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
+                    <div className="grid grid-cols-2 gap-4 mb-3">
+                      <div>
+                        <label className="block sq-label-muted mb-1">Custom Name</label>
+                        <input
+                          autoFocus
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          placeholder={sub.description}
+                          className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block sq-label-muted mb-1">Notes</label>
+                        <input
+                          value={editNotes}
+                          onChange={(e) => setEditNotes(e.target.value)}
+                          placeholder="e.g. Shared with partner"
+                          className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={() => saveEdit(sub.description)}>
+                        <Check className="w-3 h-3" /> Save
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>
+                        <X className="w-3 h-3" /> Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Charge history */}
+                {isExpanded && !isEditing && (
+                  <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
+                    <div className="sq-label-muted mb-3">
+                      {sub.occurrences} charges · last on {formatDate(sub.lastDate)}
+                    </div>
                     {sub.transactions.map((tx) => (
                       <div
                         key={tx.id}
@@ -220,10 +355,10 @@ export default function SubscriptionsPage() {
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
-            </div>
-          ))}
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </PageShell>
