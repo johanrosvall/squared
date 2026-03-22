@@ -17,7 +17,7 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Badge, Modal, Select, useToast } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
-import type { Transaction, Account, Category, CreditCardBill } from "@/lib/types";
+import type { Transaction, Account, Category, CreditCardBill, Contact } from "@/lib/types";
 
 type ViewMode = "unified" | "perAccount";
 
@@ -55,6 +55,7 @@ export default function TransactionsPage() {
   const [selectedTxId, setSelectedTxId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [contacts, setContacts] = useState<Contact[]>([]);
   const [applyingRules, setApplyingRules] = useState(false);
 
   // ─── Auto-categorize ──────────────────────────
@@ -179,6 +180,8 @@ export default function TransactionsPage() {
       if (cats) setCategories(cats);
       const { data: bills } = await supabase.from("credit_card_bills").select("*");
       if (bills) setCcBills(bills);
+      const { data: cts } = await supabase.from("contacts").select("*");
+      if (cts) setContacts(cts);
     })();
   }, [supabase]);
 
@@ -238,6 +241,34 @@ export default function TransactionsPage() {
 
   const selectedTx = transactions.find((t) => t.id === selectedTxId);
 
+  // ─── Contact resolution ───────────────────────
+  // Normalize a phone/identifier to digits only, stripped of country prefix
+  const normalizePhone = (s: string): string => {
+    const digits = s.replace(/\D/g, "");
+    if (digits.startsWith("46") && digits.length === 11) return digits.slice(2); // 46XXXXXXXXX → 9 digits
+    if (digits.startsWith("0") && digits.length === 10) return digits.slice(1);  // 0XXXXXXXXX → 9 digits
+    return digits;
+  };
+
+  // Build identifier → contact map
+  const contactByIdentifier = new Map<string, Contact>();
+  for (const c of contacts) {
+    for (const raw of [c.swish_number, c.venmo_handle, c.zelle_email, c.other_payment_app_identifier]) {
+      if (!raw) continue;
+      contactByIdentifier.set(normalizePhone(raw), c);
+      contactByIdentifier.set(raw.toLowerCase().trim(), c); // also try exact
+    }
+  }
+
+  const resolveContact = (description: string): Contact | null => {
+    const descDigits = description.replace(/\D/g, "");
+    for (const [key, contact] of contactByIdentifier) {
+      if (key.length >= 6 && descDigits.includes(key)) return contact;
+      if (key.length >= 4 && description.toLowerCase().includes(key)) return contact;
+    }
+    return null;
+  };
+
   // ─── Transaction Row ─────────────────────────
   const renderTxRow = (tx: Transaction, showAccount: boolean = true) => {
     const account = tx.account as Account | undefined;
@@ -246,6 +277,7 @@ export default function TransactionsPage() {
     const isPartner = tx.is_partner_transfer;
     const isCC = account?.type === "credit_card";
     const isShared = tx.is_shared;
+    const matchedContact = resolveContact(tx.description);
 
     return (
       <div key={tx.id}>
@@ -264,7 +296,18 @@ export default function TransactionsPage() {
           </div>
           {/* Description + badges */}
           <div className={cn("flex items-center gap-2 flex-wrap", showAccount ? "col-span-4" : "col-span-5")}>
-            <span className="font-sans text-[14px] text-sq-black truncate">{tx.description}</span>
+            {matchedContact ? (
+              <span className="flex flex-col min-w-0">
+                <span className="font-sans text-[14px] font-semibold text-sq-black truncate">
+                  {matchedContact.name}
+                </span>
+                <span className="font-sans text-[11px] text-sq-gray-400 truncate">
+                  {tx.description}
+                </span>
+              </span>
+            ) : (
+              <span className="font-sans text-[14px] text-sq-black truncate">{tx.description}</span>
+            )}
             {isCC && viewMode === "unified" && (
               <Badge variant="cc" icon={<CreditCard className="w-3 h-3" />}>
                 CC: {account?.name?.split(" ")[0]}
