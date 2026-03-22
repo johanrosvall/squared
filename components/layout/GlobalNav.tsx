@@ -10,6 +10,8 @@ const navItems = [
   { label: "Dashboard", href: "/dashboard" },
   { label: "Transactions", href: "/transactions" },
   { label: "Analytics", href: "/analytics" },
+  { label: "Subscriptions", href: "/subscriptions" },
+  { label: "Categorize", href: "/categorize" },
 ];
 
 interface GlobalNavProps {

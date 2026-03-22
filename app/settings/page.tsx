@@ -343,13 +343,30 @@ export default function SettingsPage() {
     </div>
   );
 
+  const handleSeedCategories = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { error } = await supabase.rpc("seed_default_categories", { p_user_id: user.id });
+    if (error) { toast(`Failed to seed: ${error.message}`, "error"); return; }
+    const { data: cats } = await supabase.from("categories").select("*").order("name");
+    if (cats) setCategories(cats);
+    toast("Default categories added");
+  };
+
   const renderCategories = () => (
     <div>
       <div className="flex justify-between items-center mb-6">
         <p className="font-sans text-[14px] text-sq-gray-600">Manage expense categories.</p>
-        <Button size="sm" onClick={() => setEditingCategory({ color: "#D4D4D4", is_shared: false })}>
-          <Plus className="w-3 h-3" /> Add Category
-        </Button>
+        <div className="flex gap-2">
+          {categories.length === 0 && (
+            <Button size="sm" variant="secondary" onClick={handleSeedCategories}>
+              Seed Defaults
+            </Button>
+          )}
+          <Button size="sm" onClick={() => setEditingCategory({ color: "#D4D4D4", is_shared: false })}>
+            <Plus className="w-3 h-3" /> Add Category
+          </Button>
+        </div>
       </div>
 
       {editingCategory && (
