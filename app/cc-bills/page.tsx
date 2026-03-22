@@ -132,7 +132,7 @@ export default function CcBillsPage() {
     to.setDate(to.getDate() + 45);
 
     const candidates: Transaction[] = [];
-    for (const [acctId, txs] of txByAccount) {
+    for (const [acctId, txs] of Array.from(txByAccount.entries())) {
       const acct = mainAccounts.find((a) => a.id === acctId);
       if (!acct) continue;
       for (const tx of txs) {
