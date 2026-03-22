@@ -19,16 +19,18 @@ import { formatCurrency, formatDate, pct, cn } from "@/lib/utils";
 import { buildRateMap, convert } from "@/lib/currency";
 import type { Transaction, Category, Account } from "@/lib/types";
 
-type Period = "30d" | "month" | "3m" | "year";
+type Period = "30d" | "month" | "3m" | "year" | "all";
 
 const PERIOD_LABELS: Record<Period, string> = {
   "30d": "Last 30 Days",
   month: "This Month",
   "3m": "Last 3 Months",
   year: "This Year",
+  all: "All Time",
 };
 
-function getDateRange(period: Period): { from: string; to: string } {
+function getDateRange(period: Period): { from: string | null; to: string | null } {
+  if (period === "all") return { from: null, to: null };
   const now = new Date();
   const to = now.toISOString().slice(0, 10);
   let from: Date;
@@ -82,13 +84,15 @@ export default function DashboardPage() {
     setRateMap(new Map());
 
     (async () => {
+      let txQuery = supabase
+        .from("transactions")
+        .select("*, category:categories(*), account:accounts!account_id(*)")
+        .order("date", { ascending: false });
+      if (from) txQuery = txQuery.gte("date", from);
+      if (to) txQuery = txQuery.lte("date", to);
+
       const [{ data: txs }, { data: accts }] = await Promise.all([
-        supabase
-          .from("transactions")
-          .select("*, category:categories(*), account:accounts!account_id(*)")
-          .gte("date", from)
-          .lte("date", to)
-          .order("date", { ascending: false }),
+        txQuery,
         supabase.from("accounts").select("*").eq("is_active", true),
       ]);
 
