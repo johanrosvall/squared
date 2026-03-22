@@ -42,7 +42,7 @@ export default function ReconcilePage() {
     // Unreimbursed shared expenses
     const { data: exps } = await supabase
       .from("transactions")
-      .select("*, account:accounts(*)")
+      .select("*, account:accounts!account_id(*)")
       .eq("is_shared", true)
       .in("reimbursement_status", ["none", "pending", "partial"])
       .order("date", { ascending: false });
@@ -51,7 +51,7 @@ export default function ReconcilePage() {
     // Unallocated transfers
     const { data: trans } = await supabase
       .from("transactions")
-      .select("*, account:accounts(*)")
+      .select("*, account:accounts!account_id(*)")
       .in("transaction_type", ["transfer", "partner_transfer"])
       .order("date", { ascending: false });
     if (trans) setTransfers(trans);

@@ -47,7 +47,7 @@ export default function SettlePage() {
       // User's shared expenses (from private + CC accounts)
       const { data: userShared } = await supabase
         .from("transactions")
-        .select("*, account:accounts(*)")
+        .select("*, account:accounts!account_id(*)")
         .eq("is_shared", true)
         .gte("date", dateFrom)
         .neq("transaction_type", "transfer");
@@ -65,7 +65,7 @@ export default function SettlePage() {
       // Unsettled shared expenses
       const { data: unsettled } = await supabase
         .from("transactions")
-        .select("*, account:accounts(*)")
+        .select("*, account:accounts!account_id(*)")
         .eq("is_shared", true)
         .in("reimbursement_status", ["none", "pending", "partial"])
         .gte("date", dateFrom)

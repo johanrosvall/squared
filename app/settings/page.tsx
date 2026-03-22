@@ -532,7 +532,7 @@ export default function SettingsPage() {
   const handleExportTransactions = async () => {
     const { data } = await supabase
       .from("transactions")
-      .select("date, description, amount, currency, transaction_type, is_shared, reimbursement_status, notes, account:accounts(name), category:categories(name)")
+      .select("date, description, amount, currency, transaction_type, is_shared, reimbursement_status, notes, account:accounts!account_id(name), category:categories(name)")
       .order("date", { ascending: false });
     if (!data || data.length === 0) { toast("No transactions to export", "info"); return; }
     const headers = ["Date", "Description", "Amount", "Currency", "Type", "Shared", "Reimbursement", "Account", "Category", "Notes"];

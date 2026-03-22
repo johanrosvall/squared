@@ -181,7 +181,7 @@ export default function TransactionsPage() {
     setLoading(true);
     let query = supabase
       .from("transactions")
-      .select("*, account:accounts(*), category:categories(*)")
+      .select("*")
       .order("date", { ascending: false });
 
     if (filters.dateFrom) query = query.gte("date", filters.dateFrom);
@@ -195,7 +195,8 @@ export default function TransactionsPage() {
     if (filters.reimbursementStatus === "full") query = query.eq("reimbursement_status", "full");
     if (filters.partnerOnly) query = query.eq("is_partner_transfer", true);
 
-    const { data } = await query;
+    const { data, error } = await query;
+    if (error) console.error("transactions fetch error:", error);
     if (data) setTransactions(data);
     setLoading(false);
   }, [supabase, filters]);

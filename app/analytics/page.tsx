@@ -154,7 +154,7 @@ export default function AnalyticsPage() {
     setRateMap(new Map());
     supabase
       .from("transactions")
-      .select("*, category:categories(*), account:accounts(*)")
+      .select("*, category:categories(*), account:accounts!account_id(*)")
       .gte("date", from)
       .lte("date", to)
       .order("date", { ascending: true })

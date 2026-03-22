@@ -85,7 +85,7 @@ export default function DashboardPage() {
       const [{ data: txs }, { data: accts }] = await Promise.all([
         supabase
           .from("transactions")
-          .select("*, category:categories(*), account:accounts(*)")
+          .select("*, category:categories(*), account:accounts!account_id(*)")
           .gte("date", from)
           .lte("date", to)
           .order("date", { ascending: false }),
