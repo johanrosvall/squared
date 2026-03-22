@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState, useRef } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
@@ -29,6 +29,18 @@ export function GlobalNav({ userName = "" }: GlobalNavProps) {
         .toUpperCase()
         .slice(0, 2)
     : "??";
+
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const openDropdown = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    setDropdownOpen(true);
+  };
+
+  const scheduleClose = () => {
+    closeTimer.current = setTimeout(() => setDropdownOpen(false), 400);
+  };
 
   const handleLogout = async () => {
     const supabase = createClient();
@@ -78,14 +90,14 @@ export function GlobalNav({ userName = "" }: GlobalNavProps) {
         </Link>
 
         {/* User avatar dropdown */}
-        <div className="relative group">
+        <div className="relative" onMouseEnter={openDropdown} onMouseLeave={scheduleClose}>
           <div className="w-8 h-8 bg-sq-gray-100 border border-sq-black flex items-center justify-center cursor-pointer">
             <span className="font-sans font-bold text-[12px] text-sq-black">
               {initials}
             </span>
           </div>
-          {/* Simple dropdown */}
-          <div className="absolute right-0 top-full mt-1 bg-sq-white border-2 border-sq-black hidden group-hover:block z-50 min-w-[160px]">
+          {/* Dropdown */}
+          <div className={cn("absolute right-0 top-full mt-1 bg-sq-white border-2 border-sq-black z-50 min-w-[160px]", dropdownOpen ? "block" : "hidden")}>
             <Link
               href="/settings"
               className="block px-4 py-3 font-sans text-[12px] uppercase tracking-wider font-semibold hover:bg-sq-gray-100 transition-colors"
