@@ -45,6 +45,7 @@ export default function TransactionsPage() {
   const supabase = createClient();
   const { toast } = useToast();
   const [userName, setUserName] = useState("");
+  const [displayCurrency, setDisplayCurrency] = useState("SEK");
   const [viewMode, setViewMode] = useState<ViewMode>("unified");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
@@ -167,7 +168,11 @@ export default function TransactionsPage() {
   useEffect(() => {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
-      if (user) setUserName(user.user_metadata?.name || user.email || "");
+      if (user) {
+        setUserName(user.user_metadata?.name || user.email || "");
+        const { data: profile } = await supabase.from("profiles").select("default_currency").eq("id", user.id).single();
+        if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
+      }
       const { data: accts } = await supabase.from("accounts").select("*").eq("is_active", true).order("name");
       if (accts) setAccounts(accts);
       const { data: cats } = await supabase.from("categories").select("*").order("name");
@@ -299,11 +304,13 @@ export default function TransactionsPage() {
           {/* Amount */}
           <div className={cn(
             "col-span-2 text-right font-mono text-[14px] font-bold",
-            isPartner ? "text-sq-purple" : tx.amount < 0 ? "text-sq-green" : "text-sq-black"
+            isPartner ? "text-sq-purple" : tx.amount < 0 ? "text-sq-green" : "text-sq-red"
           )}>
-            {formatCurrency(viewMode === "unified" && (tx.account as Account)?.type === "shared" && tx.is_shared
-              ? tx.amount * 0.5
-              : tx.amount
+            {formatCurrency(
+              Math.abs(viewMode === "unified" && (tx.account as Account)?.type === "shared" && tx.is_shared
+                ? tx.amount * 0.5
+                : tx.amount),
+              tx.currency || displayCurrency
             )}
           </div>
         </div>
