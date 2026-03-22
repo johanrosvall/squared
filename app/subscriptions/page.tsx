@@ -43,7 +43,7 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
 
   const subs: DetectedSub[] = [];
 
-  for (const [, txs] of groups) {
+  for (const [, txs] of Array.from(groups.entries())) {
     if (txs.length < 2) continue;
 
     const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));

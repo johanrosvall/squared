@@ -263,7 +263,7 @@ export default function TransactionsPage() {
 
   const resolveContact = (description: string): Contact | null => {
     const descDigits = description.replace(/\D/g, "");
-    for (const [key, contact] of contactByIdentifier) {
+    for (const [key, contact] of Array.from(contactByIdentifier.entries())) {
       if (key.length >= 6 && descDigits.includes(key)) return contact;
       if (key.length >= 4 && description.toLowerCase().includes(key)) return contact;
     }
