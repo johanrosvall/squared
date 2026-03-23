@@ -39,6 +39,7 @@ interface DetectedSub {
   totalSpent: number;
   occurrences: number;
   transactions: Transaction[];
+  topCategoryId: string | null;
 }
 
 function daysBetween(a: string, b: string): number {
@@ -97,6 +98,17 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
 
     const lastDate = sorted[sorted.length - 1].date;
 
+    // Most common category_id across transactions
+    const freq = new Map<string | null, number>();
+    for (const tx of sorted) {
+      freq.set(tx.category_id ?? null, (freq.get(tx.category_id ?? null) ?? 0) + 1);
+    }
+    let topCategoryId: string | null = null;
+    let topCount = 0;
+    for (const [cid, cnt] of Array.from(freq.entries())) {
+      if (cnt > topCount) { topCount = cnt; topCategoryId = cid; }
+    }
+
     subs.push({
       description: sorted[0].description,
       frequency,
@@ -107,11 +119,249 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
       totalSpent: amounts.reduce((a, b) => a + b, 0),
       occurrences: sorted.length,
       transactions: sorted,
+      topCategoryId,
     });
   }
 
   return subs.sort((a, b) => b.totalSpent - a.totalSpent);
 }
+
+function isActive(sub: DetectedSub): boolean {
+  const daysSinceLast = daysBetween(sub.lastDate, new Date().toISOString().slice(0, 10));
+  return daysSinceLast <= sub.intervalDays * 1.5;
+}
+
+function monthlyEquivalent(sub: DetectedSub): number {
+  return sub.averageAmount * (30 / sub.intervalDays);
+}
+
+// --- Simple SVG pie chart ---
+interface PieSlice {
+  catId: string | null;
+  monthly: number;
+  color: string;
+  label: string;
+}
+
+function PieChart({ slices, size = 180 }: { slices: PieSlice[]; size?: number }) {
+  const total = slices.reduce((s, r) => s + r.monthly, 0);
+  if (total === 0) return null;
+
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 4;
+
+  let cumAngle = -Math.PI / 2;
+  const paths: { d: string; color: string; key: string }[] = [];
+
+  for (const slice of slices) {
+    const angle = (slice.monthly / total) * 2 * Math.PI;
+    const x1 = cx + r * Math.cos(cumAngle);
+    const y1 = cy + r * Math.sin(cumAngle);
+    const x2 = cx + r * Math.cos(cumAngle + angle);
+    const y2 = cy + r * Math.sin(cumAngle + angle);
+    const largeArc = angle > Math.PI ? 1 : 0;
+
+    if (slices.length === 1) {
+      paths.push({
+        d: `M ${cx} ${cy} m -${r} 0 a ${r} ${r} 0 1 1 ${r * 2} 0 a ${r} ${r} 0 1 1 -${r * 2} 0`,
+        color: slice.color,
+        key: slice.catId ?? "__none__",
+      });
+    } else {
+      paths.push({
+        d: `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`,
+        color: slice.color,
+        key: slice.catId ?? "__none__",
+      });
+    }
+    cumAngle += angle;
+  }
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      {paths.map((p) => (
+        <path key={p.key} d={p.d} fill={p.color} stroke="white" strokeWidth={2} />
+      ))}
+    </svg>
+  );
+}
+
+// --- Sub table ---
+function SubTable({
+  subs,
+  categories,
+  displayCurrency,
+  overrides,
+  expanded,
+  setExpanded,
+  editing,
+  editName,
+  editNotes,
+  setEditName,
+  setEditNotes,
+  startEdit,
+  saveEdit,
+  setEditing,
+  toggleHidden,
+}: {
+  subs: DetectedSub[];
+  categories: Category[];
+  displayCurrency: string;
+  overrides: Record<string, SubOverride>;
+  expanded: string | null;
+  setExpanded: (v: string | null) => void;
+  editing: string | null;
+  editName: string;
+  editNotes: string;
+  setEditName: (v: string) => void;
+  setEditNotes: (v: string) => void;
+  startEdit: (desc: string, e: React.MouseEvent) => void;
+  saveEdit: (desc: string) => void;
+  setEditing: (v: string | null) => void;
+  toggleHidden: (desc: string, e: React.MouseEvent) => void;
+}) {
+  const isOverdue = (next: string) => new Date(next) < new Date();
+  const getOverride = (desc: string): SubOverride =>
+    overrides[desc] ?? { customName: "", notes: "", hidden: false };
+
+  return (
+    <div className="border-2 border-sq-black">
+      <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-sq-gray-100 border-b border-sq-black">
+        <div className="col-span-3 sq-label-muted">Name</div>
+        <div className="col-span-2 sq-label-muted">Category</div>
+        <div className="col-span-2 sq-label-muted">Frequency</div>
+        <div className="col-span-2 text-right sq-label-muted">Per Charge</div>
+        <div className="col-span-1 text-right sq-label-muted">Charges</div>
+        <div className="col-span-2 text-right sq-label-muted">Last Seen</div>
+      </div>
+
+      {subs.map((sub) => {
+        const ov = getOverride(sub.description);
+        const displayName = ov.customName || sub.description;
+        const isHidden = ov.hidden;
+        const isEditing = editing === sub.description;
+        const isExpanded = expanded === sub.description;
+        const cat = sub.topCategoryId ? categories.find((c) => c.id === sub.topCategoryId) : null;
+
+        return (
+          <div key={sub.description} className={isHidden ? "opacity-40" : ""}>
+            <div
+              onClick={() => !isEditing && setExpanded(isExpanded ? null : sub.description)}
+              className="grid grid-cols-12 gap-4 px-6 py-4 border-b border-sq-gray-100 items-center cursor-pointer hover:bg-sq-gray-100 transition-colors"
+            >
+              <div className="col-span-3 flex items-center gap-2 min-w-0">
+                {isExpanded
+                  ? <ChevronDown className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
+                  : <ChevronRight className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
+                }
+                <div className="min-w-0">
+                  <div className="font-sans font-semibold text-[14px] text-sq-black truncate">{displayName}</div>
+                  {ov.customName && (
+                    <div className="font-sans text-[11px] text-sq-gray-400 truncate">{sub.description}</div>
+                  )}
+                  {ov.notes && (
+                    <div className="font-sans text-[11px] text-sq-gray-600 truncate italic">{ov.notes}</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="col-span-2 flex items-center gap-1.5 min-w-0">
+                {cat ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color || "#D4D4D4" }} />
+                    <span className="font-sans text-[13px] text-sq-black truncate">{cat.name}</span>
+                  </>
+                ) : (
+                  <span className="font-sans text-[12px] text-sq-gray-400">—</span>
+                )}
+              </div>
+
+              <div className="col-span-2">
+                <span className="font-sans text-[11px] uppercase tracking-wider font-semibold text-sq-blue border border-sq-blue px-2 py-0.5">
+                  {sub.frequency}
+                </span>
+              </div>
+
+              <div className="col-span-2 text-right font-mono text-[14px] font-bold text-sq-red">
+                {formatCurrency(sub.averageAmount, displayCurrency)}
+              </div>
+
+              <div className="col-span-1 text-right font-mono text-[13px] text-sq-gray-600">
+                {sub.occurrences}
+              </div>
+
+              <div className="col-span-2 flex items-center justify-end gap-2">
+                <span className={`font-sans text-[13px] ${isOverdue(sub.nextExpected) ? "text-sq-red font-semibold" : "text-sq-gray-600"}`}>
+                  {formatDate(sub.lastDate)}
+                </span>
+                <button onClick={(e) => startEdit(sub.description, e)} className="text-sq-gray-400 hover:text-sq-black transition-colors flex-shrink-0" title="Edit">
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+                <button onClick={(e) => toggleHidden(sub.description, e)} className="text-sq-gray-400 hover:text-sq-black transition-colors flex-shrink-0" title={isHidden ? "Show" : "Hide"}>
+                  {isHidden ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+            </div>
+
+            {isEditing && (
+              <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
+                <div className="grid grid-cols-2 gap-4 mb-3">
+                  <div>
+                    <label className="block sq-label-muted mb-1">Custom Name</label>
+                    <input
+                      autoFocus
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      placeholder={sub.description}
+                      className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block sq-label-muted mb-1">Notes</label>
+                    <input
+                      value={editNotes}
+                      onChange={(e) => setEditNotes(e.target.value)}
+                      placeholder="e.g. Shared with partner"
+                      className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
+                    />
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => saveEdit(sub.description)}>
+                    <Check className="w-3 h-3" /> Save
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>
+                    <X className="w-3 h-3" /> Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {isExpanded && !isEditing && (
+              <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
+                <div className="sq-label-muted mb-3">
+                  {sub.occurrences} charges · last on {formatDate(sub.lastDate)} · next expected {formatDate(sub.nextExpected)}
+                </div>
+                {sub.transactions.map((tx) => (
+                  <div key={tx.id} className="flex justify-between items-center py-2 border-b border-sq-gray-100 last:border-0">
+                    <span className="font-mono text-[13px] text-sq-gray-600">{formatDate(tx.date)}</span>
+                    <span className="font-mono text-[13px] font-bold text-sq-red">
+                      {formatCurrency(Math.abs(tx.amount), tx.currency || displayCurrency)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Fallback colors for categories without a color set
+const FALLBACK_COLORS = ["#3B82F6","#10B981","#F59E0B","#EF4444","#8B5CF6","#EC4899","#14B8A6","#F97316","#6366F1","#84CC16"];
 
 export default function SubscriptionsPage() {
   const supabase = createClient();
@@ -122,11 +372,7 @@ export default function SubscriptionsPage() {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
-
-  // Overrides: keyed by original description
   const [overrides, setOverrides] = useState<Record<string, SubOverride>>({});
-
-  // Edit state
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editNotes, setEditNotes] = useState("");
@@ -137,11 +383,7 @@ export default function SubscriptionsPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
         setUserName(user.user_metadata?.name || user.email || "");
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("default_currency")
-          .eq("id", user.id)
-          .single();
+        const { data: profile } = await supabase.from("profiles").select("default_currency").eq("id", user.id).single();
         if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
       }
       const [{ data: txData }, { data: catData }] = await Promise.all([
@@ -154,34 +396,44 @@ export default function SubscriptionsPage() {
     })();
   }, [supabase]);
 
-  const subscriptions = useMemo(() => detectSubs(transactions), [transactions]);
+  const allSubs = useMemo(() => detectSubs(transactions), [transactions]);
 
-  // Monthly equivalent cost per subscription (normalise all frequencies to /month)
-  const monthlyEquivalent = (sub: DetectedSub) => sub.averageAmount * (30 / sub.intervalDays);
+  // For tables: respects showHidden toggle
+  const activeSubs = useMemo(() =>
+    allSubs.filter((s) => isActive(s) && (showHidden || !(overrides[s.description]?.hidden))),
+    [allSubs, overrides, showHidden]
+  );
+  const pastSubs = useMemo(() =>
+    allSubs.filter((s) => !isActive(s) && (showHidden || !(overrides[s.description]?.hidden))),
+    [allSubs, overrides, showHidden]
+  );
 
-  // Category breakdown: sum monthly equivalent costs, grouping by the most common category_id in each sub
-  const categoryBreakdown = useMemo(() => {
+  const hiddenCount = useMemo(() => allSubs.filter((s) => overrides[s.description]?.hidden).length, [allSubs, overrides]);
+
+  // For overview: always exclude hidden subs regardless of showHidden toggle
+  const activeSubsVisible = useMemo(() =>
+    allSubs.filter((s) => isActive(s) && !overrides[s.description]?.hidden),
+    [allSubs, overrides]
+  );
+
+  // Total monthly cost — only non-hidden active subs
+  const totalMonthly = useMemo(() => activeSubsVisible.reduce((sum, s) => sum + monthlyEquivalent(s), 0), [activeSubsVisible]);
+
+  // Category breakdown for active non-hidden subs → pie chart slices
+  const pieSlices = useMemo((): PieSlice[] => {
     const totals = new Map<string | null, number>();
-    for (const sub of subscriptions) {
-      // Find most common category_id among the sub's transactions
-      const freq = new Map<string | null, number>();
-      for (const tx of sub.transactions) {
-        freq.set(tx.category_id, (freq.get(tx.category_id) ?? 0) + 1);
-      }
-      let topCat: string | null = null;
-      let topCount = 0;
-      for (const [cid, cnt] of Array.from(freq.entries())) {
-        if (cnt > topCount) { topCount = cnt; topCat = cid; }
-      }
-      totals.set(topCat, (totals.get(topCat) ?? 0) + monthlyEquivalent(sub));
+    for (const sub of activeSubsVisible) {
+      totals.set(sub.topCategoryId, (totals.get(sub.topCategoryId) ?? 0) + monthlyEquivalent(sub));
     }
+    let colorIdx = 0;
     return Array.from(totals.entries())
-      .map(([catId, monthly]) => ({ catId, monthly }))
-      .sort((a, b) => b.monthly - a.monthly);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subscriptions]);
-
-  const isOverdue = (nextExpected: string) => new Date(nextExpected) < new Date();
+      .sort((a, b) => b[1] - a[1])
+      .map(([catId, monthly]) => {
+        const cat = catId ? categories.find((c) => c.id === catId) : null;
+        const color = cat?.color || FALLBACK_COLORS[colorIdx++ % FALLBACK_COLORS.length];
+        return { catId, monthly, color, label: cat?.name ?? "Uncategorized" };
+      });
+  }, [activeSubsVisible, categories]);
 
   const getOverride = (desc: string): SubOverride =>
     overrides[desc] ?? { customName: "", notes: "", hidden: false };
@@ -210,8 +462,7 @@ export default function SubscriptionsPage() {
     patchOverride(desc, { hidden: !getOverride(desc).hidden });
   };
 
-  const visible = subscriptions.filter((s) => showHidden || !getOverride(s.description).hidden);
-  const hiddenCount = subscriptions.filter((s) => getOverride(s.description).hidden).length;
+  const tableProps = { categories, displayCurrency, overrides, expanded, setExpanded, editing, editName, editNotes, setEditName, setEditNotes, startEdit, saveEdit, setEditing, toggleHidden };
 
   return (
     <PageShell userName={userName}>
@@ -226,20 +477,15 @@ export default function SubscriptionsPage() {
               className="flex items-center gap-1.5 font-sans text-[12px] uppercase font-semibold text-sq-gray-600 hover:text-sq-black transition-colors"
             >
               {showHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              {showHidden ? "Hide" : `Show ${hiddenCount} hidden`}
+              {showHidden ? "Hide hidden" : `Show ${hiddenCount} hidden`}
             </button>
           )}
-          <div className="font-sans text-[13px] text-sq-gray-600">
-            {visible.length} subscription{visible.length !== 1 ? "s" : ""}
-          </div>
         </div>
       </div>
 
       {loading ? (
-        <div className="text-center py-16 text-sq-gray-600 font-sans text-[14px]">
-          Analyzing transactions…
-        </div>
-      ) : subscriptions.length === 0 ? (
+        <div className="text-center py-16 text-sq-gray-600 font-sans text-[14px]">Analyzing transactions…</div>
+      ) : allSubs.length === 0 ? (
         <Card className="text-center py-16">
           <p className="font-sans text-sq-gray-600 text-[15px]">
             No recurring charges detected. Import more transaction history for better detection.
@@ -247,191 +493,74 @@ export default function SubscriptionsPage() {
         </Card>
       ) : (
         <>
-          {/* Monthly cost by category */}
-          {categoryBreakdown.length > 0 && (
-            <div className="mb-8">
-              <h2 className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-gray-600 mb-3">
-                Monthly Cost by Category
-              </h2>
-              <div className="border-2 border-sq-black">
-                {categoryBreakdown.map(({ catId, monthly }) => {
-                  const cat = catId ? categories.find((c) => c.id === catId) : null;
-                  return (
-                    <div
-                      key={catId ?? "__none__"}
-                      className="flex items-center justify-between px-5 py-3 border-b border-sq-gray-100 last:border-0"
-                    >
-                      <span className="flex items-center gap-2 font-sans text-[14px] text-sq-black">
-                        {cat ? (
-                          <>
-                            <span
-                              className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                              style={{ backgroundColor: cat.color || "#D4D4D4" }}
-                            />
-                            {cat.name}
-                          </>
-                        ) : (
-                          <span className="text-sq-gray-400">Uncategorized</span>
-                        )}
-                      </span>
-                      <span className="font-mono text-[14px] font-bold text-sq-red">
-                        {formatCurrency(monthly, displayCurrency)}<span className="font-sans text-[11px] font-normal text-sq-gray-400">/mo</span>
-                      </span>
+          {/* Summary + Pie chart */}
+          {pieSlices.length > 0 && (
+            <div className="mb-10 border-2 border-sq-black">
+              <div className="flex items-stretch">
+                {/* Pie */}
+                <div className="flex items-center justify-center px-8 py-6 border-r border-sq-gray-100">
+                  <PieChart slices={pieSlices} size={160} />
+                </div>
+
+                {/* Legend + total */}
+                <div className="flex-1 flex flex-col justify-between px-6 py-5">
+                  <div>
+                    <div className="font-sans font-bold text-[11px] uppercase tracking-wider text-sq-gray-600 mb-3">
+                      Monthly cost by category (active)
                     </div>
-                  );
-                })}
-                {/* Total row */}
-                <div className="flex items-center justify-between px-5 py-3 bg-sq-gray-100 border-t-2 border-sq-black">
-                  <span className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-black">Total</span>
-                  <span className="font-mono text-[15px] font-bold text-sq-red">
-                    {formatCurrency(categoryBreakdown.reduce((s, r) => s + r.monthly, 0), displayCurrency)}<span className="font-sans text-[11px] font-normal text-sq-gray-400">/mo</span>
-                  </span>
+                    <div className="space-y-2">
+                      {pieSlices.map((s) => (
+                        <div key={s.catId ?? "__none__"} className="flex items-center justify-between">
+                          <span className="flex items-center gap-2 font-sans text-[13px] text-sq-black">
+                            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: s.color }} />
+                            {s.label}
+                          </span>
+                          <span className="font-mono text-[13px] font-bold text-sq-red ml-6">
+                            {formatCurrency(s.monthly, displayCurrency)}
+                            <span className="font-sans text-[10px] font-normal text-sq-gray-400">/mo</span>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between mt-4 pt-4 border-t border-sq-gray-100">
+                    <span className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-black">Total expected</span>
+                    <span className="font-mono text-[18px] font-bold text-sq-red">
+                      {formatCurrency(totalMonthly, displayCurrency)}
+                      <span className="font-sans text-[12px] font-normal text-sq-gray-400">/mo</span>
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
           )}
 
-          <div className="border-2 border-sq-black">
-          {/* Header */}
-          <div className="grid grid-cols-12 gap-4 px-6 py-3 bg-sq-gray-100 border-b border-sq-black">
-            <div className="col-span-4 sq-label-muted">Name</div>
-            <div className="col-span-2 sq-label-muted">Frequency</div>
-            <div className="col-span-2 text-right sq-label-muted">Per Charge</div>
-            <div className="col-span-2 text-right sq-label-muted">Total Spent</div>
-            <div className="col-span-2 text-right sq-label-muted">Next Expected</div>
+          {/* Active subscriptions */}
+          <div className="mb-8">
+            <h2 className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-black mb-3">
+              Active Subscriptions
+              <span className="ml-2 font-normal text-sq-gray-600">({activeSubs.length})</span>
+            </h2>
+            {activeSubs.length === 0 ? (
+              <div className="border-2 border-sq-black px-6 py-8 text-center font-sans text-[14px] text-sq-gray-600">
+                No active subscriptions detected.
+              </div>
+            ) : (
+              <SubTable subs={activeSubs} {...tableProps} />
+            )}
           </div>
 
-          {visible.map((sub) => {
-            const ov = getOverride(sub.description);
-            const displayName = ov.customName || sub.description;
-            const isHidden = ov.hidden;
-            const isEditing = editing === sub.description;
-            const isExpanded = expanded === sub.description;
-
-            return (
-              <div key={sub.description} className={isHidden ? "opacity-40" : ""}>
-                {/* Main row */}
-                <div
-                  onClick={() => !isEditing && setExpanded(isExpanded ? null : sub.description)}
-                  className="grid grid-cols-12 gap-4 px-6 py-4 border-b border-sq-gray-100 items-center cursor-pointer hover:bg-sq-gray-100 transition-colors"
-                >
-                  <div className="col-span-4 flex items-center gap-2 min-w-0">
-                    {isExpanded
-                      ? <ChevronDown className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
-                      : <ChevronRight className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
-                    }
-                    <div className="min-w-0">
-                      <div className="font-sans font-semibold text-[14px] text-sq-black truncate">
-                        {displayName}
-                      </div>
-                      {ov.customName && (
-                        <div className="font-sans text-[11px] text-sq-gray-400 truncate">
-                          {sub.description}
-                        </div>
-                      )}
-                      {ov.notes && (
-                        <div className="font-sans text-[11px] text-sq-gray-600 truncate italic">
-                          {ov.notes}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="col-span-2">
-                    <span className="font-sans text-[11px] uppercase tracking-wider font-semibold text-sq-blue border border-sq-blue px-2 py-0.5">
-                      {sub.frequency}
-                    </span>
-                  </div>
-
-                  <div className="col-span-2 text-right font-mono text-[14px] font-bold text-sq-red">
-                    {formatCurrency(sub.averageAmount, displayCurrency)}
-                  </div>
-
-                  <div className="col-span-2 text-right font-mono text-[14px] text-sq-black">
-                    {formatCurrency(sub.totalSpent, displayCurrency)}
-                  </div>
-
-                  <div className="col-span-2 flex items-center justify-end gap-2">
-                    <span className={`font-sans text-[13px] ${isOverdue(sub.nextExpected) ? "text-sq-red font-semibold" : "text-sq-gray-600"}`}>
-                      {formatDate(sub.nextExpected)}
-                    </span>
-                    <button
-                      onClick={(e) => startEdit(sub.description, e)}
-                      className="text-sq-gray-400 hover:text-sq-black transition-colors flex-shrink-0"
-                      title="Edit"
-                    >
-                      <Pencil className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={(e) => toggleHidden(sub.description, e)}
-                      className="text-sq-gray-400 hover:text-sq-black transition-colors flex-shrink-0"
-                      title={isHidden ? "Show" : "Hide"}
-                    >
-                      {isHidden ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Edit panel */}
-                {isEditing && (
-                  <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
-                    <div className="grid grid-cols-2 gap-4 mb-3">
-                      <div>
-                        <label className="block sq-label-muted mb-1">Custom Name</label>
-                        <input
-                          autoFocus
-                          value={editName}
-                          onChange={(e) => setEditName(e.target.value)}
-                          placeholder={sub.description}
-                          className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
-                        />
-                      </div>
-                      <div>
-                        <label className="block sq-label-muted mb-1">Notes</label>
-                        <input
-                          value={editNotes}
-                          onChange={(e) => setEditNotes(e.target.value)}
-                          placeholder="e.g. Shared with partner"
-                          className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
-                        />
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button size="sm" onClick={() => saveEdit(sub.description)}>
-                        <Check className="w-3 h-3" /> Save
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>
-                        <X className="w-3 h-3" /> Cancel
-                      </Button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Charge history */}
-                {isExpanded && !isEditing && (
-                  <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
-                    <div className="sq-label-muted mb-3">
-                      {sub.occurrences} charges · last on {formatDate(sub.lastDate)}
-                    </div>
-                    {sub.transactions.map((tx) => (
-                      <div
-                        key={tx.id}
-                        className="flex justify-between items-center py-2 border-b border-sq-gray-100 last:border-0"
-                      >
-                        <span className="font-mono text-[13px] text-sq-gray-600">
-                          {formatDate(tx.date)}
-                        </span>
-                        <span className="font-mono text-[13px] font-bold text-sq-red">
-                          {formatCurrency(Math.abs(tx.amount), tx.currency || displayCurrency)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+          {/* Past subscriptions */}
+          {pastSubs.length > 0 && (
+            <div>
+              <h2 className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-gray-600 mb-3">
+                Past Subscriptions
+                <span className="ml-2 font-normal">({pastSubs.length})</span>
+              </h2>
+              <SubTable subs={pastSubs} {...tableProps} />
+            </div>
+          )}
         </>
       )}
     </PageShell>

@@ -244,6 +244,7 @@ export default function TransactionsPage() {
     let query = supabase
       .from("transactions")
       .select("*, category:categories(*), account:accounts!account_id(*)")
+      .neq("transaction_type", "cc_payment")
       .order("date", { ascending: false });
 
     if (filters.dateFrom) query = query.gte("date", filters.dateFrom);

@@ -49,6 +49,7 @@ export default function CategorizePage() {
           .from("transactions")
           .select("*")
           .is("category_id", null)
+          .neq("transaction_type", "cc_payment")
           .order("description"),
         supabase.from("categories").select("*").order("name"),
       ]);
