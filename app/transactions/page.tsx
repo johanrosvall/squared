@@ -200,6 +200,15 @@ export default function TransactionsPage() {
     fetchTransactions();
   };
 
+  const handleRemoveAllDuplicates = async () => {
+    setDeletingDups(true);
+    const toDelete = dupGroups.flatMap((g) => g.slice(1).map((t) => t.id));
+    await supabase.from("transactions").delete().in("id", toDelete);
+    setDupGroups([]);
+    setDeletingDups(false);
+    fetchTransactions();
+  };
+
   // CC Bill modal
   const [ccModalOpen, setCcModalOpen] = useState(false);
   const [ccModalTxId, setCcModalTxId] = useState<string | null>(null);
@@ -669,10 +678,19 @@ export default function TransactionsPage() {
           </div>
         ) : (
           <div>
-            <p className="font-sans text-[13px] text-sq-gray-600 mb-4">
-              Found {dupGroups.length} group{dupGroups.length !== 1 ? "s" : ""} of duplicate transactions.
-              Keep the first occurrence and delete the rest, or remove individually.
-            </p>
+            <div className="flex justify-between items-center mb-4">
+              <p className="font-sans text-[13px] text-sq-gray-600">
+                Found {dupGroups.length} group{dupGroups.length !== 1 ? "s" : ""} of duplicates.
+                Keep the first occurrence and delete the rest, or remove individually.
+              </p>
+              <button
+                onClick={handleRemoveAllDuplicates}
+                disabled={deletingDups}
+                className="flex-shrink-0 ml-4 px-3 py-1.5 bg-sq-red text-sq-white font-sans font-semibold text-[11px] uppercase tracking-wider hover:opacity-80 disabled:opacity-40 transition-opacity"
+              >
+                Remove All Duplicates
+              </button>
+            </div>
             <div className="space-y-4 max-h-[60vh] overflow-y-auto">
               {dupGroups.map((group, gi) => (
                 <div key={gi} className="border-2 border-sq-black">
