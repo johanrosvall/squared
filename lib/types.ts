@@ -105,7 +105,7 @@ export interface Transaction {
 export interface CreditCardBill {
   id: string;
   user_id: string;
-  payment_transaction_id: string;
+  payment_transaction_id: string | null;
   credit_card_account_id: string;
   statement_start_date: string;
   statement_end_date: string;
