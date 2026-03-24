@@ -8,34 +8,87 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
-import type { Account, Transaction, CreditCardBill } from "@/lib/types";
+import type { Account, Transaction, CreditCardBill, ImportBatch } from "@/lib/types";
 
 interface Period {
-  key: string; // "YYYY-MM"
-  label: string;
+  key: string;           // import_batch_id (or fallback key)
+  batchId: string | null;
+  label: string;         // e.g. "15 Nov – 14 Dec 2024"
+  startDate: string;     // min transaction date in batch
+  endDate: string;       // max transaction date in batch
   transactions: Transaction[];
   total: number;
   bill: CreditCardBill | null;
   payment: Transaction | null;
 }
 
-function groupByMonth(txs: Transaction[]): Period[] {
-  const map = new Map<string, Transaction[]>();
+/** Group transactions by import_batch_id, falling back to calendar month for any without a batch. */
+function groupByBatch(txs: Transaction[], batches: ImportBatch[]): Period[] {
+  const batchMap = new Map<string, Transaction[]>();
+  const noBatch: Transaction[] = [];
+
   for (const tx of txs) {
-    const key = tx.date.slice(0, 7); // "YYYY-MM"
-    if (!map.has(key)) map.set(key, []);
-    map.get(key)!.push(tx);
+    if (tx.import_batch_id) {
+      if (!batchMap.has(tx.import_batch_id)) batchMap.set(tx.import_batch_id, []);
+      batchMap.get(tx.import_batch_id)!.push(tx);
+    } else {
+      noBatch.push(tx);
+    }
   }
-  return Array.from(map.entries())
-    .map(([key, txs]) => ({
-      key,
-      label: new Date(key + "-01").toLocaleDateString("en-US", { month: "long", year: "numeric" }),
-      transactions: txs.sort((a, b) => a.date.localeCompare(b.date)),
-      total: txs.reduce((s, t) => s + Math.abs(t.amount), 0),
+
+  const periods: Period[] = [];
+
+  // Batch-grouped periods
+  for (const [batchId, batchTxs] of Array.from(batchMap.entries())) {
+    const sorted = [...batchTxs].sort((a, b) => a.date.localeCompare(b.date));
+    const startDate = sorted[0].date;
+    const endDate = sorted[sorted.length - 1].date;
+    const batch = batches.find((b) => b.id === batchId);
+    const label = batch
+      ? `${formatDateShort(startDate)} – ${formatDateShort(endDate)}`
+      : `${formatDateShort(startDate)} – ${formatDateShort(endDate)}`;
+    periods.push({
+      key: batchId,
+      batchId,
+      label,
+      startDate,
+      endDate,
+      transactions: sorted,
+      total: sorted.reduce((s, t) => s + Math.abs(t.amount), 0),
       bill: null,
       payment: null,
-    }))
-    .sort((a, b) => b.key.localeCompare(a.key));
+    });
+  }
+
+  // Fall-through: transactions without a batch_id, grouped by calendar month
+  if (noBatch.length > 0) {
+    const monthMap = new Map<string, Transaction[]>();
+    for (const tx of noBatch) {
+      const key = tx.date.slice(0, 7);
+      if (!monthMap.has(key)) monthMap.set(key, []);
+      monthMap.get(key)!.push(tx);
+    }
+    for (const [month, mTxs] of Array.from(monthMap.entries())) {
+      const sorted = [...mTxs].sort((a, b) => a.date.localeCompare(b.date));
+      periods.push({
+        key: `month:${month}`,
+        batchId: null,
+        label: new Date(month + "-01").toLocaleDateString("en-US", { month: "long", year: "numeric" }),
+        startDate: sorted[0].date,
+        endDate: sorted[sorted.length - 1].date,
+        transactions: sorted,
+        total: sorted.reduce((s, t) => s + Math.abs(t.amount), 0),
+        bill: null,
+        payment: null,
+      });
+    }
+  }
+
+  return periods.sort((a, b) => b.endDate.localeCompare(a.endDate));
+}
+
+function formatDateShort(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString("en-SE", { day: "numeric", month: "short", year: "numeric" });
 }
 
 export default function CcBillsPage() {
@@ -45,6 +98,7 @@ export default function CcBillsPage() {
   const [ccAccounts, setCcAccounts] = useState<Account[]>([]);
   const [mainAccounts, setMainAccounts] = useState<Account[]>([]);
   const [txByAccount, setTxByAccount] = useState<Map<string, Transaction[]>>(new Map());
+  const [batchesByAccount, setBatchesByAccount] = useState<Map<string, ImportBatch[]>>(new Map());
   const [bills, setBills] = useState<CreditCardBill[]>([]);
   const [paymentsByBill, setPaymentsByBill] = useState<Map<string, Transaction>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -52,7 +106,7 @@ export default function CcBillsPage() {
   const [expandedPeriod, setExpandedPeriod] = useState<string | null>(null);
 
   // Linking state
-  const [linkingPeriod, setLinkingPeriod] = useState<string | null>(null); // "accountId:YYYY-MM"
+  const [linkingPeriod, setLinkingPeriod] = useState<string | null>(null);
   const [candidatePayments, setCandidatePayments] = useState<Transaction[]>([]);
   const [selectedPaymentId, setSelectedPaymentId] = useState("");
   const [linking, setLinking] = useState(false);
@@ -67,29 +121,45 @@ export default function CcBillsPage() {
     }
 
     const { data: accts } = await supabase.from("accounts").select("*").eq("is_active", true);
-    if (accts) {
-      setCcAccounts(accts.filter((a: Account) => a.type === "credit_card"));
-      setMainAccounts(accts.filter((a: Account) => a.type !== "credit_card"));
-    }
+    if (!accts) { setLoading(false); return; }
+
+    const ccAccts = accts.filter((a: Account) => a.type === "credit_card");
+    const mainAccts = accts.filter((a: Account) => a.type !== "credit_card");
+    setCcAccounts(ccAccts);
+    setMainAccounts(mainAccts);
 
     const { data: txs } = await supabase
       .from("transactions")
       .select("*")
       .order("date", { ascending: false });
 
+    // Load import batches for CC accounts
+    const { data: batchData } = await supabase
+      .from("import_batches")
+      .select("*")
+      .in("account_id", ccAccts.map((a: Account) => a.id));
+
     if (txs) {
-      const map = new Map<string, Transaction[]>();
+      const txMap = new Map<string, Transaction[]>();
       for (const tx of txs as Transaction[]) {
-        if (!map.has(tx.account_id)) map.set(tx.account_id, []);
-        map.get(tx.account_id)!.push(tx);
+        if (!txMap.has(tx.account_id)) txMap.set(tx.account_id, []);
+        txMap.get(tx.account_id)!.push(tx);
       }
-      setTxByAccount(map);
+      setTxByAccount(txMap);
+    }
+
+    if (batchData) {
+      const bMap = new Map<string, ImportBatch[]>();
+      for (const b of batchData as ImportBatch[]) {
+        if (!bMap.has(b.account_id)) bMap.set(b.account_id, []);
+        bMap.get(b.account_id)!.push(b);
+      }
+      setBatchesByAccount(bMap);
     }
 
     const { data: billData } = await supabase.from("credit_card_bills").select("*");
     if (billData) setBills(billData);
 
-    // Build payment lookup: bill.id → payment transaction
     if (billData && txs) {
       const pmap = new Map<string, Transaction>();
       for (const bill of billData as CreditCardBill[]) {
@@ -105,15 +175,18 @@ export default function CcBillsPage() {
   useEffect(() => { loadData(); }, [supabase]);
 
   const periodsForAccount = (accountId: string): Period[] => {
-    const txs = (txByAccount.get(accountId) || []).filter((t) => t.amount > 0); // expenses only
-    const periods = groupByMonth(txs);
+    const txs = (txByAccount.get(accountId) || []).filter((t) => t.amount > 0);
+    const batches = batchesByAccount.get(accountId) || [];
+    const periods = groupByBatch(txs, batches);
+
     return periods.map((p) => {
-      const bill = bills.find(
-        (b) =>
-          b.credit_card_account_id === accountId &&
-          b.statement_start_date <= p.key + "-31" &&
-          b.statement_end_date >= p.key + "-01"
-      ) || null;
+      // Match a bill: prefer batch_id match, fall back to date overlap
+      const bill = bills.find((b) => {
+        if (b.credit_card_account_id !== accountId) return false;
+        if (p.batchId && b.import_batch_id === p.batchId) return true;
+        // date overlap fallback
+        return b.statement_start_date <= p.endDate && b.statement_end_date >= p.startDate;
+      }) || null;
       const payment = bill ? (paymentsByBill.get(bill.id) || null) : null;
       return { ...p, bill, payment };
     });
@@ -124,26 +197,38 @@ export default function CcBillsPage() {
     setLinkingPeriod(key);
     setSelectedPaymentId("");
 
-    // Find candidate payments from main accounts around the period date (+/- 45 days)
-    const periodDate = new Date(period.key + "-28");
-    const from = new Date(periodDate);
-    from.setDate(from.getDate() - 20);
-    const to = new Date(periodDate);
-    to.setDate(to.getDate() + 45);
+    // Search for payments AFTER the last transaction in the batch (bill always comes after last tx)
+    // Window: last tx date to last tx date + 60 days
+    const lastTxDate = new Date(period.endDate);
+    const searchFrom = period.endDate; // payment can't be before last transaction
+    const searchTo = new Date(lastTxDate);
+    searchTo.setDate(searchTo.getDate() + 60);
+    const searchToStr = searchTo.toISOString().slice(0, 10);
 
     const candidates: Transaction[] = [];
     for (const [acctId, txs] of Array.from(txByAccount.entries())) {
       const acct = mainAccounts.find((a) => a.id === acctId);
       if (!acct) continue;
       for (const tx of txs) {
-        if (tx.date >= from.toISOString().slice(0, 10) &&
-            tx.date <= to.toISOString().slice(0, 10) &&
-            tx.amount < 0) { // negative = money leaving main account = payment
+        if (
+          tx.date >= searchFrom &&
+          tx.date <= searchToStr &&
+          tx.amount < 0 // outgoing from main account
+        ) {
           candidates.push(tx);
         }
       }
     }
-    setCandidatePayments(candidates.sort((a, b) => b.date.localeCompare(a.date)));
+
+    // Sort: closest amount match first
+    const target = period.total;
+    candidates.sort((a, b) => {
+      const diffA = Math.abs(Math.abs(a.amount) - target);
+      const diffB = Math.abs(Math.abs(b.amount) - target);
+      return diffA - diffB;
+    });
+
+    setCandidatePayments(candidates);
   };
 
   const handleLinkPayment = async (accountId: string, period: Period) => {
@@ -153,35 +238,28 @@ export default function CcBillsPage() {
     const paymentTx = candidatePayments.find((t) => t.id === selectedPaymentId);
     if (!paymentTx) { setLinking(false); return; }
 
-    // Create credit_card_bill record
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { setLinking(false); return; }
 
-    const startDate = `${period.key}-01`;
-    const endDate = `${period.key}-31`;
+    const billPayload = {
+      payment_transaction_id: selectedPaymentId,
+      total_amount: period.total,
+      statement_start_date: period.startDate,
+      statement_end_date: period.endDate,
+      import_batch_id: period.batchId,
+    };
 
     if (period.bill) {
-      // Update existing
-      await supabase.from("credit_card_bills").update({
-        payment_transaction_id: selectedPaymentId,
-        total_amount: period.total,
-        statement_start_date: startDate,
-        statement_end_date: endDate,
-      }).eq("id", period.bill.id);
+      await supabase.from("credit_card_bills").update(billPayload).eq("id", period.bill.id);
     } else {
-      // Create new
       await supabase.from("credit_card_bills").insert({
         user_id: user.id,
-        payment_transaction_id: selectedPaymentId,
         credit_card_account_id: accountId,
-        statement_start_date: startDate,
-        statement_end_date: endDate,
-        total_amount: period.total,
         is_exploded: false,
+        ...billPayload,
       });
     }
 
-    // Mark the payment transaction as cc_payment type
     await supabase.from("transactions")
       .update({ transaction_type: "cc_payment" })
       .eq("id", selectedPaymentId);
@@ -192,15 +270,9 @@ export default function CcBillsPage() {
   };
 
   const handleExplode = async (bill: CreditCardBill, payment: Transaction) => {
-    const key = bill.id;
-    setExploding(key);
-
-    // Delete the payment transaction from the main account
+    setExploding(bill.id);
     await supabase.from("transactions").delete().eq("id", payment.id);
-
-    // Mark the bill as exploded
     await supabase.from("credit_card_bills").update({ is_exploded: true }).eq("id", bill.id);
-
     setExploding(null);
     await loadData();
   };
@@ -220,7 +292,7 @@ export default function CcBillsPage() {
           Credit Card Bills
         </h1>
         <p className="font-sans text-[13px] text-sq-gray-600">
-          Link payments to billing periods, then explode to replace with individual charges
+          Each row = one imported statement file. Link to the matching payment, then explode.
         </p>
       </div>
 
@@ -238,7 +310,6 @@ export default function CcBillsPage() {
 
             return (
               <div key={ccAcct.id} className="border-2 border-sq-black">
-                {/* Account header */}
                 <button
                   onClick={() => setExpandedAccount(isOpen ? null : ccAcct.id)}
                   className="w-full flex items-center justify-between px-6 py-4 hover:bg-sq-gray-100 transition-colors"
@@ -247,7 +318,7 @@ export default function CcBillsPage() {
                     <CreditCard className="w-5 h-5 text-sq-black" />
                     <span className="font-sans font-bold text-[16px] text-sq-black">{ccAcct.name}</span>
                     <span className="font-sans text-[12px] text-sq-gray-600">
-                      {periods.length} periods · {periods.filter((p) => p.bill && !p.bill.is_exploded).length} linked
+                      {periods.length} statement{periods.length !== 1 ? "s" : ""} · {periods.filter((p) => p.bill && !p.bill.is_exploded).length} linked
                     </span>
                   </div>
                   {isOpen ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
@@ -255,13 +326,12 @@ export default function CcBillsPage() {
 
                 {isOpen && (
                   <div className="border-t border-sq-black">
-                    {/* Period list header */}
                     <div className="grid grid-cols-12 gap-4 px-6 py-2 bg-sq-gray-100 border-b border-sq-black">
-                      <div className="col-span-2 sq-label-muted">Period</div>
+                      <div className="col-span-3 sq-label-muted">Statement Period</div>
                       <div className="col-span-1 sq-label-muted text-right">Txns</div>
-                      <div className="col-span-2 sq-label-muted text-right">Total</div>
-                      <div className="col-span-4 sq-label-muted">Payment</div>
-                      <div className="col-span-3 sq-label-muted text-right">Actions</div>
+                      <div className="col-span-2 sq-label-muted text-right">Bill Total</div>
+                      <div className="col-span-4 sq-label-muted">Payment Matched</div>
+                      <div className="col-span-2 sq-label-muted text-right">Actions</div>
                     </div>
 
                     {periods.map((period) => {
@@ -270,21 +340,38 @@ export default function CcBillsPage() {
                       const isLinking = linkingPeriod === periodKey;
                       const isExploded = period.bill?.is_exploded ?? false;
 
+                      // Amount match quality indicator
+                      const amountDiff = period.payment
+                        ? Math.abs(Math.abs(period.payment.amount) - period.total)
+                        : null;
+                      const amountPct = amountDiff !== null && period.total > 0
+                        ? (amountDiff / period.total) * 100
+                        : null;
+                      const matchQuality = amountPct === null ? null
+                        : amountPct < 1 ? "good"
+                        : amountPct < 5 ? "ok"
+                        : "poor";
+
                       return (
                         <div key={period.key} className={cn(isExploded && "opacity-50")}>
                           <div className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
                             {/* Period label */}
                             <div
-                              className="col-span-2 flex items-center gap-1.5 cursor-pointer"
+                              className="col-span-3 flex items-center gap-1.5 cursor-pointer"
                               onClick={() => setExpandedPeriod(isExpandedPeriod ? null : periodKey)}
                             >
                               {isExpandedPeriod
-                                ? <ChevronDown className="w-3.5 h-3.5 text-sq-gray-600" />
-                                : <ChevronRight className="w-3.5 h-3.5 text-sq-gray-600" />
+                                ? <ChevronDown className="w-3.5 h-3.5 text-sq-gray-600 flex-shrink-0" />
+                                : <ChevronRight className="w-3.5 h-3.5 text-sq-gray-600 flex-shrink-0" />
                               }
-                              <span className="font-sans text-[13px] font-semibold text-sq-black">
-                                {period.label}
-                              </span>
+                              <div>
+                                <div className="font-sans text-[13px] font-semibold text-sq-black">
+                                  {period.label}
+                                </div>
+                                {!period.batchId && (
+                                  <div className="font-sans text-[10px] text-sq-gray-400 italic">no batch</div>
+                                )}
+                              </div>
                             </div>
 
                             {/* Count */}
@@ -302,16 +389,31 @@ export default function CcBillsPage() {
                               {isExploded ? (
                                 <span className="text-sq-green font-semibold">✓ Exploded</span>
                               ) : period.payment ? (
-                                <span className="text-sq-black">
-                                  {formatDate(period.payment.date)} · {formatCurrency(Math.abs(period.payment.amount), displayCurrency)}
-                                </span>
+                                <div>
+                                  <span className="text-sq-black">
+                                    {formatDate(period.payment.date)} · {formatCurrency(Math.abs(period.payment.amount), displayCurrency)}
+                                  </span>
+                                  {matchQuality === "poor" && (
+                                    <span className="ml-2 text-sq-red text-[11px] font-semibold">
+                                      ⚠ {amountPct?.toFixed(0)}% diff
+                                    </span>
+                                  )}
+                                  {matchQuality === "ok" && (
+                                    <span className="ml-2 text-amber-500 text-[11px]">
+                                      ~{amountPct?.toFixed(1)}% diff
+                                    </span>
+                                  )}
+                                  {matchQuality === "good" && (
+                                    <span className="ml-2 text-sq-green text-[11px]">✓ match</span>
+                                  )}
+                                </div>
                               ) : (
                                 <span className="text-sq-gray-400 italic">No payment linked</span>
                               )}
                             </div>
 
                             {/* Actions */}
-                            <div className="col-span-3 flex justify-end gap-2">
+                            <div className="col-span-2 flex justify-end gap-2">
                               {!isExploded && (
                                 <>
                                   <button
@@ -339,15 +441,16 @@ export default function CcBillsPage() {
                           {/* Link payment UI */}
                           {isLinking && (
                             <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
-                              <div className="sq-label-muted mb-3">
-                                Select the payment from your main account for {period.label}
+                              <div className="sq-label-muted mb-1">
+                                Bill total: <strong>{formatCurrency(period.total, displayCurrency)}</strong>
+                                <span className="ml-2 text-sq-gray-400">— candidates sorted by closest amount match, after {formatDate(period.endDate)}</span>
                               </div>
                               {candidatePayments.length === 0 ? (
-                                <p className="font-sans text-[13px] text-sq-gray-600">
-                                  No outgoing payments found from main accounts around this period.
+                                <p className="font-sans text-[13px] text-sq-gray-600 mt-2">
+                                  No outgoing payments found in main accounts after {formatDate(period.endDate)}.
                                 </p>
                               ) : (
-                                <div className="flex items-end gap-3">
+                                <div className="flex items-end gap-3 mt-2">
                                   <div className="flex-1">
                                     <select
                                       value={selectedPaymentId}
@@ -357,9 +460,12 @@ export default function CcBillsPage() {
                                       <option value="">Select payment…</option>
                                       {candidatePayments.map((tx) => {
                                         const acctName = mainAccounts.find((a) => a.id === tx.account_id)?.name || "";
+                                        const diff = Math.abs(Math.abs(tx.amount) - period.total);
+                                        const pct = period.total > 0 ? (diff / period.total * 100).toFixed(1) : "?";
+                                        const matchTag = diff < 1 ? "✓ exact" : `${pct}% diff`;
                                         return (
                                           <option key={tx.id} value={tx.id}>
-                                            {formatDate(tx.date)} · {tx.description} · {formatCurrency(Math.abs(tx.amount), displayCurrency)} ({acctName})
+                                            {formatDate(tx.date)} · {tx.description} · {formatCurrency(Math.abs(tx.amount), displayCurrency)} [{matchTag}] ({acctName})
                                           </option>
                                         );
                                       })}
@@ -399,6 +505,14 @@ export default function CcBillsPage() {
                                   </div>
                                 </div>
                               ))}
+                              <div className="grid grid-cols-12 gap-4 px-10 py-2 bg-sq-gray-100 border-t border-sq-black">
+                                <div className="col-span-9 font-sans text-[11px] uppercase font-bold tracking-wider text-sq-gray-600">
+                                  Total ({period.transactions.length} transactions)
+                                </div>
+                                <div className="col-span-3 text-right font-mono text-[13px] font-bold text-sq-red">
+                                  {formatCurrency(period.total, displayCurrency)}
+                                </div>
+                              </div>
                             </div>
                           )}
                         </div>

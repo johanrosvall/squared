@@ -111,6 +111,7 @@ export interface CreditCardBill {
   statement_end_date: string;
   total_amount: number;
   is_exploded: boolean;
+  import_batch_id: string | null;
   // Joined
   payment_transaction?: Transaction;
   charges?: Transaction[];
