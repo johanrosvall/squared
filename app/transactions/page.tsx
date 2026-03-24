@@ -878,13 +878,37 @@ function TransactionDetailPanel({
               placeholder="Add a note…"
             />
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Button size="sm" onClick={handleSave} disabled={saving}>
               {saving ? "Saving…" : "Save"}
             </Button>
             <Button size="sm" variant="secondary" onClick={onOpenCcModal}>
               CC Bill
             </Button>
+            {tx.transaction_type !== "internal_transfer" ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={async () => {
+                  await supabase.from("transactions").update({ transaction_type: "internal_transfer" }).eq("id", tx.id);
+                  onUpdate();
+                }}
+              >
+                Mark Internal Transfer
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={async () => {
+                  const type = tx.amount > 0 ? "expense" : "income";
+                  await supabase.from("transactions").update({ transaction_type: type }).eq("id", tx.id);
+                  onUpdate();
+                }}
+              >
+                Unmark Internal Transfer
+              </Button>
+            )}
           </div>
         </div>
       </div>

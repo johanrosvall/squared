@@ -157,6 +157,8 @@ export default function AnalyticsPage() {
       .select("*, category:categories(*), account:accounts!account_id(*)")
       .gte("date", from)
       .lte("date", to)
+      .neq("transaction_type", "cc_payment")
+      .neq("transaction_type", "internal_transfer")
       .order("date", { ascending: true })
       .then(async ({ data }) => {
         if (data) {

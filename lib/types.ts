@@ -14,7 +14,8 @@ export type TransactionType =
   | "income"
   | "transfer"
   | "cc_payment"
-  | "partner_transfer";
+  | "partner_transfer"
+  | "internal_transfer";
 
 export type SettlementDirection = "to_shared" | "from_shared";
 
