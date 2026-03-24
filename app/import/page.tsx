@@ -213,33 +213,46 @@ export default function ImportPage() {
       if (isFaktura) {
         // ── Extract month name from "Månad" row for CSV filename ──
         const manadRow = allRows.find((row) => String(row[0]).trim() === "Månad");
-        const manad = manadRow ? String(manadRow[6] || "").trim() : "";
+        const manad = manadRow
+          ? String(manadRow.find((v, i) => i > 0 && v !== "") || "").trim()
+          : "";
 
         // ── Only take rows from the "Köp/uttag" section ──────────
         // The file has two sections:
         //   "Totalt övriga händelser" — contains Inbetalning, Ränta, Saldo (skip)
         //   "Köp/uttag"              — actual purchases and refunds (keep)
         const kopIdx = allRows.findIndex((row) => String(row[0]).trim() === "Köp/uttag");
+
+        // Find column indices from the section's own header row — do NOT hardcode
+        let colBelopp = 6;    // Belopp (SEK amount)
+        let colUtlBelopp = 5; // Utl. belopp (foreign currency amount)
+
         let txRows: (string | number)[][];
         if (kopIdx >= 0) {
           // Find the Datum/Bokfört header row inside the Köp/uttag section
           const headerIdx = allRows.findIndex(
             (row, i) => i > kopIdx && String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
           );
+          if (headerIdx >= 0) {
+            const hRow = allRows[headerIdx];
+            const bIdx = hRow.findIndex((h) => String(h).trim() === "Belopp");
+            const uIdx = hRow.findIndex((h) => String(h).trim() === "Utl. belopp");
+            if (bIdx >= 0) colBelopp = bIdx;
+            if (uIdx >= 0) colUtlBelopp = uIdx;
+          }
           const startIdx = headerIdx >= 0 ? headerIdx + 1 : kopIdx + 2;
           txRows = allRows.slice(startIdx).filter((row) => {
             const col0 = String(row[0] || "");
-            if (!(/^\d{4}-\d{2}-\d{2}$/.test(col0))) return false; // must be a date
-            if (typeof row[6] !== "number") return false;           // must have SEK amount
+            if (!(/^\d{4}-\d{2}-\d{2}$/.test(col0))) return false;
+            if (typeof row[colBelopp] !== "number") return false;
             return true;
           });
         } else {
-          // Fallback for files without "Köp/uttag" header: filter by date+amount
-          // and explicitly exclude non-transaction rows
+          // Fallback: filter by date+amount and exclude non-transaction rows
           txRows = allRows.filter((row) => {
             const dateStr = String(row[0] || "");
             if (!(/^\d{4}-\d{2}-\d{2}$/.test(dateStr))) return false;
-            if (typeof row[6] !== "number") return false;
+            if (typeof row[colBelopp] !== "number") return false;
             const desc = String(row[2] || "").toLowerCase().trim();
             if (desc === "inbetalning") return false;
             if (desc.startsWith("ränta") || desc.startsWith("dröjsmål")) return false;
@@ -247,21 +260,23 @@ export default function ImportPage() {
           });
         }
 
-        // ── Build normalized CSV for download ────────────────────
+        // ── Build normalized CSV for download (semicolon-separated for Swedish Excel) ──
+        // Numbers are quoted to prevent Excel from misinterpreting large values as date serials.
         const csvLines = [
-          "Datum,Bokfört,Specifikation,Ort,Valuta,Utl. belopp,Belopp",
+          "Datum;Bokfört;Specifikation;Ort;Valuta;Utl. belopp;Belopp SEK",
           ...txRows.map((row) => {
             const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
-            const utlBelopp = typeof row[5] === "number" && row[5] !== 0 ? String(row[5]) : "";
+            const utlAmt = typeof row[colUtlBelopp] === "number" && row[colUtlBelopp] !== 0
+              ? `"${row[colUtlBelopp]}"` : "";
             return [
               String(row[0]),
               String(row[1]),
               esc(String(row[2])),
               esc(String(row[3])),
               String(row[4] || "SEK"),
-              utlBelopp,
-              String(row[6]),
-            ].join(",");
+              utlAmt,
+              `"${row[colBelopp]}"`,
+            ].join(";");
           }),
         ];
         setFakturaMonth(manad);
@@ -275,7 +290,7 @@ export default function ImportPage() {
           String(row[2]),
           String(row[3]),
           String(row[4] || "SEK"),
-          String(row[6]),
+          String(row[colBelopp]),
         ]);
 
         const fakturaMapping: CsvColumnMapping = {
