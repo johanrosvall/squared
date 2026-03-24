@@ -34,10 +34,7 @@ const accountTypeIcon: Record<string, React.ReactNode> = {
   other: <Landmark className="w-6 h-6 text-sq-black" />,
 };
 
-// Keywords that identify CC bill payments in a checking account
-const CC_PAYMENT_KEYWORDS = ["seb kort", "kortbetalning", "kreditkort", "cc payment", "credit card payment"];
-
-// Amount must match within this tolerance to be considered a match
+// Amount must match within this tolerance to be auto-suggested
 const AMOUNT_MATCH_PCT = 0.02; // 2%
 
 function daysBetween(a: string, b: string): number {
@@ -69,9 +66,9 @@ function detectBillingPeriods(
       const dates = txs.map((t) => t.date).sort();
       const startDate = dates[0];
       const endDate = dates[dates.length - 1];
-      const totalCharges = txs.reduce((s, t) => s + Math.abs(t.amount), 0);
+      const totalCharges = Math.abs(txs.reduce((s, t) => s + t.amount, 0));
 
-      const confirmedBill = existingBills.find((b) => b.statement_end_date === endDate) ?? null;
+      const confirmedBill = existingBills.find((b) => b.import_batch_id === batch.id) ?? null;
 
       // Match by amount first (strict tolerance), payment must be on or after endDate
       let suggestedPayment: { tx: Transaction; delta: number; daysAfter: number } | null = null;
@@ -177,9 +174,7 @@ export default function AccountsPage() {
         .in("account_id", checkingAccounts.map((a) => a.id))
         .order("date", { ascending: true });
       if (candData) {
-        candidates = candData.filter((tx) =>
-          CC_PAYMENT_KEYWORDS.some((kw) => tx.description.toLowerCase().includes(kw))
-        );
+        candidates = candData;
       }
     }
 
@@ -218,6 +213,7 @@ export default function AccountsPage() {
       await supabase.from("credit_card_bills").insert({
         user_id: user.id,
         credit_card_account_id: view.accountId,
+        import_batch_id: period.batchId,
         payment_transaction_id: paymentTxId,
         statement_start_date: period.startDate,
         statement_end_date: period.endDate,
@@ -427,7 +423,7 @@ export default function AccountsPage() {
           <h2 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">CC Billing: {view.accountName}</h2>
         </div>
         <p className="font-sans text-[13px] text-sq-gray-600 mb-8 ml-9">
-          Each row is one imported statement file. Matching is done by amount (within 2%) against "SEB KORT" payments in your checking account — payment must come after the last transaction in the statement. Confirm auto-suggestions or pick manually.
+          Each row is one imported statement file. Matching is done by amount (within 2%) against all transactions in your checking account — payment must come after the last transaction in the statement. Confirm auto-suggestions or pick manually.
         </p>
 
         {ccLoading ? (
@@ -593,11 +589,6 @@ export default function AccountsPage() {
               })}
             </div>
 
-            {paymentCandidates.length === 0 && (
-              <p className="mt-4 font-sans text-[12px] text-sq-gray-400">
-                No CC payment transactions detected in your checking accounts. Transactions must contain keywords like "SEB KORT", "KORTBETALNING", or "KREDITKORT" to be auto-matched.
-              </p>
-            )}
           </>
         )}
       </div>

@@ -110,12 +110,6 @@ export function GlobalNav({ userName = "" }: GlobalNavProps) {
             >
               Accounts
             </Link>
-            <Link
-              href="/cc-bills"
-              className="block px-4 py-3 font-sans text-[12px] uppercase tracking-wider font-semibold hover:bg-sq-gray-100 transition-colors"
-            >
-              CC Bills
-            </Link>
             <button
               onClick={handleLogout}
               className="block w-full text-left px-4 py-3 font-sans text-[12px] uppercase tracking-wider font-semibold text-sq-red hover:bg-red-50 transition-colors"
