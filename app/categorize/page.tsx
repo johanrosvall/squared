@@ -3,7 +3,7 @@
 export const dynamic = "force-dynamic";
 
 import React, { useState, useEffect, useMemo } from "react";
-import { ChevronDown, ChevronRight, Check } from "lucide-react";
+import { ChevronDown, ChevronRight, Check, Sparkles } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
@@ -28,6 +28,8 @@ export default function CategorizePage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [selections, setSelections] = useState<Record<string, string>>({});
+  // descriptions that were pre-filled from history (shown with a badge)
+  const [suggestedDescs, setSuggestedDescs] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [applying, setApplying] = useState<string | null>(null);
   const [applied, setApplied] = useState<Set<string>>(new Set());
@@ -45,7 +47,7 @@ export default function CategorizePage() {
         if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
       }
 
-      const [{ data: txs }, { data: cats }] = await Promise.all([
+      const [{ data: txs }, { data: cats }, { data: categorized }] = await Promise.all([
         supabase
           .from("transactions")
           .select("*")
@@ -53,10 +55,46 @@ export default function CategorizePage() {
           .eq("transaction_type", "expense")
           .order("description"),
         supabase.from("categories").select("*").order("name"),
+        supabase
+          .from("transactions")
+          .select("description, category_id")
+          .not("category_id", "is", null)
+          .eq("transaction_type", "expense"),
       ]);
 
       if (txs) setTransactions(txs);
       if (cats) setCategories(cats);
+
+      // Build suggestion map: description → most-frequently-used category
+      if (categorized && txs) {
+        const freq = new Map<string, Map<string, number>>();
+        for (const tx of categorized) {
+          const key = tx.description.trim();
+          const catMap = freq.get(key) ?? new Map<string, number>();
+          catMap.set(tx.category_id, (catMap.get(tx.category_id) ?? 0) + 1);
+          freq.set(key, catMap);
+        }
+
+        const uncategorizedDescs = new Set(txs.map((t) => t.description.trim()));
+        const initial: Record<string, string> = {};
+        const suggested = new Set<string>();
+
+        for (const desc of uncategorizedDescs) {
+          const catMap = freq.get(desc);
+          if (catMap) {
+            // Pick the category used most often for this exact description
+            const [topCatId] = [...catMap.entries()].sort((a, b) => b[1] - a[1])[0];
+            initial[desc] = topCatId;
+            suggested.add(desc);
+          }
+        }
+
+        if (Object.keys(initial).length > 0) {
+          setSelections(initial);
+          setSuggestedDescs(suggested);
+        }
+      }
+
       setLoading(false);
     })();
   }, [supabase]);
@@ -105,6 +143,7 @@ export default function CategorizePage() {
     localStorage.setItem(LS_RULES_KEY, JSON.stringify(rules));
 
     setApplied((prev) => new Set(prev).add(description));
+    setSuggestedDescs((prev) => { const s = new Set(prev); s.delete(description); return s; });
     setApplying(null);
   };
 
@@ -121,6 +160,12 @@ export default function CategorizePage() {
         </h1>
         <div className="font-sans text-[13px] text-sq-gray-600">
           {visibleGroups.length} groups · {visibleGroups.reduce((s, g) => s + g.transactions.length, 0)} uncategorized
+          {suggestedDescs.size > 0 && (
+            <span className="ml-3 inline-flex items-center gap-1 text-sq-blue font-semibold">
+              <Sparkles className="w-3.5 h-3.5" />
+              {suggestedDescs.size} auto-suggested from history
+            </span>
+          )}
         </div>
       </div>
 
@@ -159,7 +204,7 @@ export default function CategorizePage() {
               <div className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
                 {/* Description — click to expand */}
                 <div
-                  className="col-span-4 flex items-center gap-2 cursor-pointer"
+                  className="col-span-4 flex items-center gap-2 cursor-pointer min-w-0"
                   onClick={() =>
                     setExpanded(expanded === group.description ? null : group.description)
                   }
@@ -171,6 +216,12 @@ export default function CategorizePage() {
                   <span className="font-sans text-[13px] text-sq-black truncate">
                     {group.description}
                   </span>
+                  {suggestedDescs.has(group.description) && (
+                    <span className="flex-shrink-0 flex items-center gap-0.5 text-sq-blue font-sans text-[10px] font-semibold uppercase tracking-wider">
+                      <Sparkles className="w-3 h-3" />
+                      Suggested
+                    </span>
+                  )}
                 </div>
 
                 <div className="col-span-1">
@@ -182,9 +233,11 @@ export default function CategorizePage() {
                 <div className="col-span-3">
                   <select
                     value={selections[group.description] || ""}
-                    onChange={(e) =>
-                      setSelections((prev) => ({ ...prev, [group.description]: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setSelections((prev) => ({ ...prev, [group.description]: e.target.value }));
+                      // Clear the suggestion badge once the user manually picks
+                      setSuggestedDescs((prev) => { const s = new Set(prev); s.delete(group.description); return s; });
+                    }}
                     className="w-full border border-sq-gray-400 px-2 py-1.5 font-sans text-[12px] outline-none focus:border-sq-black bg-white"
                   >
                     <option value="">Select category…</option>
