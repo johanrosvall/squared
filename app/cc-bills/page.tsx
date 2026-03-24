@@ -8,83 +8,105 @@ import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
-import type { Account, Transaction, CreditCardBill, ImportBatch } from "@/lib/types";
+import type { Account, Transaction, CreditCardBill } from "@/lib/types";
 
 interface Period {
-  key: string;           // import_batch_id (or fallback key)
-  batchId: string | null;
-  label: string;         // e.g. "15 Nov – 14 Dec 2024"
-  startDate: string;     // min transaction date in batch
-  endDate: string;       // max transaction date in batch
+  key: string;
+  label: string;
+  startDate: string;
+  endDate: string;
   transactions: Transaction[];
   total: number;
   bill: CreditCardBill | null;
   payment: Transaction | null;
 }
 
-/** Group transactions by import_batch_id, falling back to calendar month for any without a batch. */
-function groupByBatch(txs: Transaction[], batches: ImportBatch[]): Period[] {
-  const batchMap = new Map<string, Transaction[]>();
-  const noBatch: Transaction[] = [];
-
-  for (const tx of txs) {
-    if (tx.import_batch_id) {
-      if (!batchMap.has(tx.import_batch_id)) batchMap.set(tx.import_batch_id, []);
-      batchMap.get(tx.import_batch_id)!.push(tx);
-    } else {
-      noBatch.push(tx);
-    }
-  }
+/**
+ * Build billing periods for a CC account by anchoring on linked payment transactions.
+ * Each payment defines a period boundary: CC transactions that occurred BEFORE this payment
+ * but AFTER the previous payment belong to this billing period.
+ * Remaining CC transactions (not yet covered by any payment) form an "unlinked" group.
+ */
+function buildPeriods(
+  ccTxs: Transaction[],
+  linkedPayments: Transaction[], // sorted ascending by date
+  existingBills: CreditCardBill[]
+): Period[] {
+  const sorted = [...ccTxs].sort((a, b) => a.date.localeCompare(b.date));
+  if (sorted.length === 0) return [];
 
   const periods: Period[] = [];
 
-  // Batch-grouped periods
-  for (const [batchId, batchTxs] of Array.from(batchMap.entries())) {
-    const sorted = [...batchTxs].sort((a, b) => a.date.localeCompare(b.date));
-    const startDate = sorted[0].date;
-    const endDate = sorted[sorted.length - 1].date;
-    const batch = batches.find((b) => b.id === batchId);
-    const label = batch
-      ? `${formatDateShort(startDate)} – ${formatDateShort(endDate)}`
-      : `${formatDateShort(startDate)} – ${formatDateShort(endDate)}`;
+  if (linkedPayments.length === 0) {
+    // No payments linked yet — show all CC transactions as one unlinked group
+    const total = sorted.reduce((s, t) => s + Math.abs(t.amount), 0);
     periods.push({
-      key: batchId,
-      batchId,
-      label,
+      key: "unlinked",
+      label: `${formatDateShort(sorted[0].date)} – ${formatDateShort(sorted[sorted.length - 1].date)}`,
+      startDate: sorted[0].date,
+      endDate: sorted[sorted.length - 1].date,
+      transactions: sorted,
+      total,
+      bill: null,
+      payment: null,
+    });
+    return periods;
+  }
+
+  // Sort payments oldest-first
+  const payments = [...linkedPayments].sort((a, b) => a.date.localeCompare(b.date));
+
+  // Build one period per payment
+  for (let i = 0; i < payments.length; i++) {
+    const pay = payments[i];
+    const prevPayDate = i === 0 ? "" : payments[i - 1].date;
+
+    // CC transactions that belong to this payment: date <= payment date and date > prev payment date
+    const periodTxs = sorted.filter((t) => {
+      if (t.date > pay.date) return false;
+      if (prevPayDate && t.date <= prevPayDate) return false;
+      return true;
+    });
+
+    if (periodTxs.length === 0) continue;
+
+    const startDate = periodTxs[0].date;
+    const endDate = periodTxs[periodTxs.length - 1].date;
+    const total = periodTxs.reduce((s, t) => s + Math.abs(t.amount), 0);
+
+    // Find the bill record associated with this payment
+    const bill = existingBills.find((b) => b.payment_transaction_id === pay.id) || null;
+
+    periods.push({
+      key: pay.id,
+      label: `${formatDateShort(startDate)} – ${formatDateShort(endDate)}`,
       startDate,
       endDate,
-      transactions: sorted,
-      total: sorted.reduce((s, t) => s + Math.abs(t.amount), 0),
+      transactions: periodTxs,
+      total,
+      bill,
+      payment: pay,
+    });
+  }
+
+  // Remaining CC transactions after the last payment
+  const lastPayDate = payments[payments.length - 1].date;
+  const remaining = sorted.filter((t) => t.date > lastPayDate);
+  if (remaining.length > 0) {
+    const total = remaining.reduce((s, t) => s + Math.abs(t.amount), 0);
+    periods.push({
+      key: "current",
+      label: `${formatDateShort(remaining[0].date)} – present`,
+      startDate: remaining[0].date,
+      endDate: remaining[remaining.length - 1].date,
+      transactions: remaining,
+      total,
       bill: null,
       payment: null,
     });
   }
 
-  // Fall-through: transactions without a batch_id, grouped by calendar month
-  if (noBatch.length > 0) {
-    const monthMap = new Map<string, Transaction[]>();
-    for (const tx of noBatch) {
-      const key = tx.date.slice(0, 7);
-      if (!monthMap.has(key)) monthMap.set(key, []);
-      monthMap.get(key)!.push(tx);
-    }
-    for (const [month, mTxs] of Array.from(monthMap.entries())) {
-      const sorted = [...mTxs].sort((a, b) => a.date.localeCompare(b.date));
-      periods.push({
-        key: `month:${month}`,
-        batchId: null,
-        label: new Date(month + "-01").toLocaleDateString("en-US", { month: "long", year: "numeric" }),
-        startDate: sorted[0].date,
-        endDate: sorted[sorted.length - 1].date,
-        transactions: sorted,
-        total: sorted.reduce((s, t) => s + Math.abs(t.amount), 0),
-        bill: null,
-        payment: null,
-      });
-    }
-  }
-
-  return periods.sort((a, b) => b.endDate.localeCompare(a.endDate));
+  return periods.reverse(); // newest first
 }
 
 function formatDateShort(dateStr: string): string {
@@ -97,10 +119,8 @@ export default function CcBillsPage() {
   const [displayCurrency, setDisplayCurrency] = useState("SEK");
   const [ccAccounts, setCcAccounts] = useState<Account[]>([]);
   const [mainAccounts, setMainAccounts] = useState<Account[]>([]);
-  const [txByAccount, setTxByAccount] = useState<Map<string, Transaction[]>>(new Map());
-  const [batchesByAccount, setBatchesByAccount] = useState<Map<string, ImportBatch[]>>(new Map());
+  const [allTxs, setAllTxs] = useState<Transaction[]>([]);
   const [bills, setBills] = useState<CreditCardBill[]>([]);
-  const [paymentsByBill, setPaymentsByBill] = useState<Map<string, Transaction>>(new Map());
   const [loading, setLoading] = useState(true);
   const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
   const [expandedPeriod, setExpandedPeriod] = useState<string | null>(null);
@@ -133,41 +153,11 @@ export default function CcBillsPage() {
       .select("*")
       .order("date", { ascending: false });
 
-    // Load import batches for CC accounts
-    const { data: batchData } = await supabase
-      .from("import_batches")
-      .select("*")
-      .in("account_id", ccAccts.map((a: Account) => a.id));
-
-    if (txs) {
-      const txMap = new Map<string, Transaction[]>();
-      for (const tx of txs as Transaction[]) {
-        if (!txMap.has(tx.account_id)) txMap.set(tx.account_id, []);
-        txMap.get(tx.account_id)!.push(tx);
-      }
-      setTxByAccount(txMap);
-    }
-
-    if (batchData) {
-      const bMap = new Map<string, ImportBatch[]>();
-      for (const b of batchData as ImportBatch[]) {
-        if (!bMap.has(b.account_id)) bMap.set(b.account_id, []);
-        bMap.get(b.account_id)!.push(b);
-      }
-      setBatchesByAccount(bMap);
-    }
+    if (txs) setAllTxs(txs as Transaction[]);
 
     const { data: billData } = await supabase.from("credit_card_bills").select("*");
     if (billData) setBills(billData);
 
-    if (billData && txs) {
-      const pmap = new Map<string, Transaction>();
-      for (const bill of billData as CreditCardBill[]) {
-        const payTx = (txs as Transaction[]).find((t) => t.id === bill.payment_transaction_id);
-        if (payTx) pmap.set(bill.id, payTx);
-      }
-      setPaymentsByBill(pmap);
-    }
 
     setLoading(false);
   };
@@ -175,56 +165,40 @@ export default function CcBillsPage() {
   useEffect(() => { loadData(); }, [supabase]);
 
   const periodsForAccount = (accountId: string): Period[] => {
-    const txs = (txByAccount.get(accountId) || []).filter((t) => t.amount > 0);
-    const batches = batchesByAccount.get(accountId) || [];
-    const periods = groupByBatch(txs, batches);
+    // All CC transactions for this account (all amounts — purchases + refunds)
+    const ccTxs = allTxs.filter((t) => t.account_id === accountId);
 
-    return periods.map((p) => {
-      // Match a bill: prefer batch_id match, fall back to date overlap
-      const bill = bills.find((b) => {
-        if (b.credit_card_account_id !== accountId) return false;
-        if (p.batchId && b.import_batch_id === p.batchId) return true;
-        // date overlap fallback
-        return b.statement_start_date <= p.endDate && b.statement_end_date >= p.startDate;
-      }) || null;
-      const payment = bill ? (paymentsByBill.get(bill.id) || null) : null;
-      return { ...p, bill, payment };
-    });
+    // All known payment transactions linked to this CC account's bills
+    const ccBills = bills.filter((b) => b.credit_card_account_id === accountId);
+    const linkedPayments: Transaction[] = [];
+    for (const b of ccBills) {
+      const payTx = allTxs.find((t) => t.id === b.payment_transaction_id);
+      if (payTx) linkedPayments.push(payTx);
+    }
+
+    return buildPeriods(ccTxs, linkedPayments, ccBills);
   };
 
-  const handleStartLink = async (accountId: string, period: Period) => {
+  const handleStartLink = (accountId: string, period: Period) => {
     const key = `${accountId}:${period.key}`;
     setLinkingPeriod(key);
     setSelectedPaymentId("");
 
-    // Search for payments AFTER the last transaction in the batch (bill always comes after last tx)
-    // Window: last tx date to last tx date + 60 days
-    const lastTxDate = new Date(period.endDate);
-    const searchFrom = period.endDate; // payment can't be before last transaction
-    const searchTo = new Date(lastTxDate);
-    searchTo.setDate(searchTo.getDate() + 60);
-    const searchToStr = searchTo.toISOString().slice(0, 10);
+    // Candidates: outgoing transactions from main accounts
+    // that come AFTER the last CC transaction in this period
+    // Sorted by closest amount match to the CC total
+    const candidates = allTxs.filter((tx) => {
+      if (mainAccounts.every((a) => a.id !== tx.account_id)) return false;
+      if (tx.date < period.endDate) return false; // payment must come after last CC tx
+      if (tx.amount > 0) return false; // only outgoing (negative = money leaving checking)
+      if (tx.transaction_type === "cc_payment") return true; // already tagged
+      // Also include any large outgoing transactions that could be CC payments
+      return true;
+    });
 
-    const candidates: Transaction[] = [];
-    for (const [acctId, txs] of Array.from(txByAccount.entries())) {
-      const acct = mainAccounts.find((a) => a.id === acctId);
-      if (!acct) continue;
-      for (const tx of txs) {
-        if (
-          tx.date >= searchFrom &&
-          tx.date <= searchToStr &&
-          tx.amount < 0 // outgoing from main account
-        ) {
-          candidates.push(tx);
-        }
-      }
-    }
-
-    // Sort: closest amount match first
-    const target = period.total;
     candidates.sort((a, b) => {
-      const diffA = Math.abs(Math.abs(a.amount) - target);
-      const diffB = Math.abs(Math.abs(b.amount) - target);
+      const diffA = Math.abs(Math.abs(a.amount) - period.total);
+      const diffB = Math.abs(Math.abs(b.amount) - period.total);
       return diffA - diffB;
     });
 
@@ -246,11 +220,16 @@ export default function CcBillsPage() {
       total_amount: period.total,
       statement_start_date: period.startDate,
       statement_end_date: period.endDate,
-      import_batch_id: period.batchId,
+      import_batch_id: null,
     };
 
-    if (period.bill) {
-      await supabase.from("credit_card_bills").update(billPayload).eq("id", period.bill.id);
+    // Check if a bill already exists for this payment
+    const existingBill = bills.find(
+      (b) => b.credit_card_account_id === accountId && b.payment_transaction_id === selectedPaymentId
+    ) || (period.bill || null);
+
+    if (existingBill) {
+      await supabase.from("credit_card_bills").update(billPayload).eq("id", existingBill.id);
     } else {
       await supabase.from("credit_card_bills").insert({
         user_id: user.id,
@@ -292,7 +271,7 @@ export default function CcBillsPage() {
           Credit Card Bills
         </h1>
         <p className="font-sans text-[13px] text-sq-gray-600">
-          Each row = one imported statement file. Link to the matching payment, then explode.
+          Link a payment to anchor the billing period, then explode to replace with individual charges
         </p>
       </div>
 
@@ -307,6 +286,7 @@ export default function CcBillsPage() {
           {ccAccounts.map((ccAcct) => {
             const periods = periodsForAccount(ccAcct.id);
             const isOpen = expandedAccount === ccAcct.id;
+            const linkedCount = periods.filter((p) => p.payment).length;
 
             return (
               <div key={ccAcct.id} className="border-2 border-sq-black">
@@ -318,7 +298,7 @@ export default function CcBillsPage() {
                     <CreditCard className="w-5 h-5 text-sq-black" />
                     <span className="font-sans font-bold text-[16px] text-sq-black">{ccAcct.name}</span>
                     <span className="font-sans text-[12px] text-sq-gray-600">
-                      {periods.length} statement{periods.length !== 1 ? "s" : ""} · {periods.filter((p) => p.bill && !p.bill.is_exploded).length} linked
+                      {periods.length} period{periods.length !== 1 ? "s" : ""} · {linkedCount} linked
                     </span>
                   </div>
                   {isOpen ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
@@ -327,12 +307,18 @@ export default function CcBillsPage() {
                 {isOpen && (
                   <div className="border-t border-sq-black">
                     <div className="grid grid-cols-12 gap-4 px-6 py-2 bg-sq-gray-100 border-b border-sq-black">
-                      <div className="col-span-3 sq-label-muted">Statement Period</div>
+                      <div className="col-span-3 sq-label-muted">Period (actual CC dates)</div>
                       <div className="col-span-1 sq-label-muted text-right">Txns</div>
-                      <div className="col-span-2 sq-label-muted text-right">Bill Total</div>
-                      <div className="col-span-4 sq-label-muted">Payment Matched</div>
+                      <div className="col-span-2 sq-label-muted text-right">CC Total</div>
+                      <div className="col-span-4 sq-label-muted">Payment from checking</div>
                       <div className="col-span-2 sq-label-muted text-right">Actions</div>
                     </div>
+
+                    {periods.length === 0 && (
+                      <div className="px-6 py-8 text-center font-sans text-[14px] text-sq-gray-600">
+                        No transactions found for this account.
+                      </div>
+                    )}
 
                     {periods.map((period) => {
                       const periodKey = `${ccAcct.id}:${period.key}`;
@@ -340,7 +326,6 @@ export default function CcBillsPage() {
                       const isLinking = linkingPeriod === periodKey;
                       const isExploded = period.bill?.is_exploded ?? false;
 
-                      // Amount match quality indicator
                       const amountDiff = period.payment
                         ? Math.abs(Math.abs(period.payment.amount) - period.total)
                         : null;
@@ -355,7 +340,6 @@ export default function CcBillsPage() {
                       return (
                         <div key={period.key} className={cn(isExploded && "opacity-50")}>
                           <div className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
-                            {/* Period label */}
                             <div
                               className="col-span-3 flex items-center gap-1.5 cursor-pointer"
                               onClick={() => setExpandedPeriod(isExpandedPeriod ? null : periodKey)}
@@ -364,55 +348,36 @@ export default function CcBillsPage() {
                                 ? <ChevronDown className="w-3.5 h-3.5 text-sq-gray-600 flex-shrink-0" />
                                 : <ChevronRight className="w-3.5 h-3.5 text-sq-gray-600 flex-shrink-0" />
                               }
-                              <div>
-                                <div className="font-sans text-[13px] font-semibold text-sq-black">
-                                  {period.label}
-                                </div>
-                                {!period.batchId && (
-                                  <div className="font-sans text-[10px] text-sq-gray-400 italic">no batch</div>
-                                )}
-                              </div>
+                              <span className="font-sans text-[13px] font-semibold text-sq-black leading-tight">
+                                {period.label}
+                              </span>
                             </div>
 
-                            {/* Count */}
                             <div className="col-span-1 text-right font-mono text-[13px] text-sq-gray-600">
                               {period.transactions.length}
                             </div>
 
-                            {/* Total */}
                             <div className="col-span-2 text-right font-mono text-[14px] font-bold text-sq-red">
                               {formatCurrency(period.total, displayCurrency)}
                             </div>
 
-                            {/* Payment status */}
                             <div className="col-span-4 font-sans text-[13px]">
                               {isExploded ? (
                                 <span className="text-sq-green font-semibold">✓ Exploded</span>
                               ) : period.payment ? (
-                                <div>
+                                <div className="flex items-center gap-2 flex-wrap">
                                   <span className="text-sq-black">
                                     {formatDate(period.payment.date)} · {formatCurrency(Math.abs(period.payment.amount), displayCurrency)}
                                   </span>
-                                  {matchQuality === "poor" && (
-                                    <span className="ml-2 text-sq-red text-[11px] font-semibold">
-                                      ⚠ {amountPct?.toFixed(0)}% diff
-                                    </span>
-                                  )}
-                                  {matchQuality === "ok" && (
-                                    <span className="ml-2 text-amber-500 text-[11px]">
-                                      ~{amountPct?.toFixed(1)}% diff
-                                    </span>
-                                  )}
-                                  {matchQuality === "good" && (
-                                    <span className="ml-2 text-sq-green text-[11px]">✓ match</span>
-                                  )}
+                                  {matchQuality === "good" && <span className="text-sq-green text-[11px] font-semibold">✓ exact</span>}
+                                  {matchQuality === "ok" && <span className="text-amber-500 text-[11px]">~{amountPct?.toFixed(1)}% diff</span>}
+                                  {matchQuality === "poor" && <span className="text-sq-red text-[11px] font-semibold">⚠ {amountPct?.toFixed(0)}% diff</span>}
                                 </div>
                               ) : (
-                                <span className="text-sq-gray-400 italic">No payment linked</span>
+                                <span className="text-sq-gray-400 italic">Not linked</span>
                               )}
                             </div>
 
-                            {/* Actions */}
                             <div className="col-span-2 flex justify-end gap-2">
                               {!isExploded && (
                                 <>
@@ -423,7 +388,7 @@ export default function CcBillsPage() {
                                     <Link2 className="w-3 h-3" />
                                     {period.payment ? "Re-link" : "Link"}
                                   </button>
-                                  {period.payment && period.bill && (
+                                  {period.payment && period.bill && !isExploded && (
                                     <button
                                       onClick={() => handleExplode(period.bill!, period.payment!)}
                                       disabled={exploding === period.bill!.id}
@@ -442,12 +407,12 @@ export default function CcBillsPage() {
                           {isLinking && (
                             <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
                               <div className="sq-label-muted mb-1">
-                                Bill total: <strong>{formatCurrency(period.total, displayCurrency)}</strong>
-                                <span className="ml-2 text-sq-gray-400">— candidates sorted by closest amount match, after {formatDate(period.endDate)}</span>
+                                CC total: <strong>{formatCurrency(period.total, displayCurrency)}</strong>
+                                <span className="ml-2 text-sq-gray-400">· candidates sorted by closest amount, must be on or after {formatDate(period.endDate)}</span>
                               </div>
                               {candidatePayments.length === 0 ? (
                                 <p className="font-sans text-[13px] text-sq-gray-600 mt-2">
-                                  No outgoing payments found in main accounts after {formatDate(period.endDate)}.
+                                  No outgoing payments found in checking accounts after {formatDate(period.endDate)}.
                                 </p>
                               ) : (
                                 <div className="flex items-end gap-3 mt-2">
@@ -462,20 +427,16 @@ export default function CcBillsPage() {
                                         const acctName = mainAccounts.find((a) => a.id === tx.account_id)?.name || "";
                                         const diff = Math.abs(Math.abs(tx.amount) - period.total);
                                         const pct = period.total > 0 ? (diff / period.total * 100).toFixed(1) : "?";
-                                        const matchTag = diff < 1 ? "✓ exact" : `${pct}% diff`;
+                                        const tag = diff < 1 ? "✓ exact" : `${pct}% diff`;
                                         return (
                                           <option key={tx.id} value={tx.id}>
-                                            {formatDate(tx.date)} · {tx.description} · {formatCurrency(Math.abs(tx.amount), displayCurrency)} [{matchTag}] ({acctName})
+                                            {formatDate(tx.date)} · {tx.description} · {formatCurrency(Math.abs(tx.amount), displayCurrency)} [{tag}] ({acctName})
                                           </option>
                                         );
                                       })}
                                     </select>
                                   </div>
-                                  <Button
-                                    size="sm"
-                                    onClick={() => handleLinkPayment(ccAcct.id, period)}
-                                    disabled={!selectedPaymentId || linking}
-                                  >
+                                  <Button size="sm" onClick={() => handleLinkPayment(ccAcct.id, period)} disabled={!selectedPaymentId || linking}>
                                     {linking ? "Linking…" : "Confirm"}
                                   </Button>
                                   <Button size="sm" variant="ghost" onClick={() => setLinkingPeriod(null)}>
@@ -490,16 +451,9 @@ export default function CcBillsPage() {
                           {isExpandedPeriod && (
                             <div className="border-b border-sq-black">
                               {period.transactions.map((tx) => (
-                                <div
-                                  key={tx.id}
-                                  className="grid grid-cols-12 gap-4 px-10 py-2 border-b border-sq-gray-100 items-center last:border-0"
-                                >
-                                  <div className="col-span-2 font-mono text-[12px] text-sq-gray-600">
-                                    {formatDate(tx.date)}
-                                  </div>
-                                  <div className="col-span-7 font-sans text-[13px] text-sq-black">
-                                    {tx.description}
-                                  </div>
+                                <div key={tx.id} className="grid grid-cols-12 gap-4 px-10 py-2 border-b border-sq-gray-100 items-center last:border-0">
+                                  <div className="col-span-2 font-mono text-[12px] text-sq-gray-600">{formatDate(tx.date)}</div>
+                                  <div className="col-span-7 font-sans text-[13px] text-sq-black">{tx.description}</div>
                                   <div className="col-span-3 text-right font-mono text-[13px] font-bold text-sq-red">
                                     {formatCurrency(Math.abs(tx.amount), tx.currency || displayCurrency)}
                                   </div>
