@@ -2,135 +2,145 @@
 
 export const dynamic = "force-dynamic";
 
-import React, { useState, useEffect } from "react";
-import { CreditCard, Link2, Zap, ChevronDown, ChevronRight } from "lucide-react";
+import React, { useState, useEffect, useMemo } from "react";
+import { CreditCard, ChevronDown, ChevronRight, Check, AlertTriangle, HelpCircle } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card } from "@/components/ui";
 import { createClient } from "@/lib/supabase/client";
-import { formatCurrency, formatDate, cn } from "@/lib/utils";
+import { formatCurrency, formatDate } from "@/lib/utils";
 import type { Account, Transaction, CreditCardBill } from "@/lib/types";
 
-interface Period {
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface BillingPeriod {
+  /** Unique key: the payment transaction id, or "unmatched-{startDate}" */
   key: string;
-  label: string;
-  startDate: string;
-  endDate: string;
-  transactions: Transaction[];
-  total: number;
+  startDate: string;   // first CC transaction date in this period
+  endDate: string;     // last CC transaction date in this period
+  ccTransactions: Transaction[];
+  ccTotal: number;
+  /** Best auto-suggested payment from checking, sorted by amount closeness */
+  suggestedPayment: Transaction | null;
+  /** All payment candidates from checking accounts, sorted by amount closeness */
+  candidates: Transaction[];
+  /** Confirmed/saved payment (from credit_card_bills record) */
+  confirmedPayment: Transaction | null;
   bill: CreditCardBill | null;
-  payment: Transaction | null;
+  diffPct: number | null;  // % difference between confirmed payment and CC total
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function fmt(d: string) {
+  return new Date(d).toLocaleDateString("en-SE", { day: "numeric", month: "short", year: "numeric" });
 }
 
 /**
- * Build billing periods for a CC account by anchoring on linked payment transactions.
- * Each payment defines a period boundary: CC transactions that occurred BEFORE this payment
- * but AFTER the previous payment belong to this billing period.
- * Remaining CC transactions (not yet covered by any payment) form an "unlinked" group.
+ * Group CC transactions into billing periods using CONFIRMED payment dates as boundaries.
+ * For unconfirmed periods, group by calendar month as a reasonable default.
  */
-function buildPeriods(
+function buildBillingPeriods(
   ccTxs: Transaction[],
-  linkedPayments: Transaction[], // sorted ascending by date
-  existingBills: CreditCardBill[]
-): Period[] {
+  confirmedPayments: Transaction[],       // payments already saved in credit_card_bills
+  allCheckingTxs: Transaction[],          // all transactions from non-CC accounts
+  bills: CreditCardBill[]
+): BillingPeriod[] {
   const sorted = [...ccTxs].sort((a, b) => a.date.localeCompare(b.date));
   if (sorted.length === 0) return [];
 
-  const periods: Period[] = [];
+  const periods: BillingPeriod[] = [];
 
-  if (linkedPayments.length === 0) {
-    // No payments linked yet — show all CC transactions as one unlinked group
-    const total = sorted.reduce((s, t) => s + Math.abs(t.amount), 0);
-    periods.push({
-      key: "unlinked",
-      label: `${formatDateShort(sorted[0].date)} – ${formatDateShort(sorted[sorted.length - 1].date)}`,
-      startDate: sorted[0].date,
-      endDate: sorted[sorted.length - 1].date,
-      transactions: sorted,
-      total,
-      bill: null,
-      payment: null,
-    });
-    return periods;
-  }
+  // ── 1. Build confirmed periods ──────────────────────────────────────────
+  const sortedPayments = [...confirmedPayments].sort((a, b) => a.date.localeCompare(b.date));
 
-  // Sort payments oldest-first
-  const payments = [...linkedPayments].sort((a, b) => a.date.localeCompare(b.date));
+  for (let i = 0; i < sortedPayments.length; i++) {
+    const pay = sortedPayments[i];
+    const prevPayDate = i === 0 ? "" : sortedPayments[i - 1].date;
 
-  // Build one period per payment
-  for (let i = 0; i < payments.length; i++) {
-    const pay = payments[i];
-    const prevPayDate = i === 0 ? "" : payments[i - 1].date;
-
-    // CC transactions that belong to this payment: date <= payment date and date > prev payment date
     const periodTxs = sorted.filter((t) => {
       if (t.date > pay.date) return false;
       if (prevPayDate && t.date <= prevPayDate) return false;
       return true;
     });
-
     if (periodTxs.length === 0) continue;
 
-    const startDate = periodTxs[0].date;
-    const endDate = periodTxs[periodTxs.length - 1].date;
-    const total = periodTxs.reduce((s, t) => s + Math.abs(t.amount), 0);
-
-    // Find the bill record associated with this payment
-    const bill = existingBills.find((b) => b.payment_transaction_id === pay.id) || null;
+    const ccTotal = periodTxs.reduce((s, t) => s + Math.abs(t.amount), 0);
+    const bill = bills.find((b) => b.payment_transaction_id === pay.id) || null;
+    const diff = bill ? Math.abs(Math.abs(pay.amount) - ccTotal) / (ccTotal || 1) * 100 : null;
 
     periods.push({
       key: pay.id,
-      label: `${formatDateShort(startDate)} – ${formatDateShort(endDate)}`,
-      startDate,
-      endDate,
-      transactions: periodTxs,
-      total,
+      startDate: periodTxs[0].date,
+      endDate: periodTxs[periodTxs.length - 1].date,
+      ccTransactions: periodTxs,
+      ccTotal,
+      suggestedPayment: pay,
+      candidates: [],
+      confirmedPayment: pay,
       bill,
-      payment: pay,
+      diffPct: diff,
     });
   }
 
-  // Remaining CC transactions after the last payment
-  const lastPayDate = payments[payments.length - 1].date;
-  const remaining = sorted.filter((t) => t.date > lastPayDate);
-  if (remaining.length > 0) {
-    const total = remaining.reduce((s, t) => s + Math.abs(t.amount), 0);
-    periods.push({
-      key: "current",
-      label: `${formatDateShort(remaining[0].date)} – present`,
-      startDate: remaining[0].date,
-      endDate: remaining[remaining.length - 1].date,
-      transactions: remaining,
-      total,
-      bill: null,
-      payment: null,
-    });
+  // ── 2. Remaining CC transactions not covered by any confirmed payment ───
+  const lastPayDate = sortedPayments.length > 0 ? sortedPayments[sortedPayments.length - 1].date : "";
+  const unmatched = sorted.filter((t) => !lastPayDate || t.date > lastPayDate);
+
+  if (unmatched.length > 0) {
+    // Group unmatched by calendar month
+    const monthMap = new Map<string, Transaction[]>();
+    for (const tx of unmatched) {
+      const key = tx.date.slice(0, 7);
+      if (!monthMap.has(key)) monthMap.set(key, []);
+      monthMap.get(key)!.push(tx);
+    }
+
+    for (const [month, txs] of Array.from(monthMap.entries()).sort(([a], [b]) => b.localeCompare(a))) {
+      const sortedMonth = [...txs].sort((a, b) => a.date.localeCompare(b.date));
+      const ccTotal = sortedMonth.reduce((s, t) => s + Math.abs(t.amount), 0);
+      const endDate = sortedMonth[sortedMonth.length - 1].date;
+
+      // Find candidates: expenses from checking that come on or after the last CC transaction
+      // amount > 0 because expenses (money leaving checking) are stored as positive
+      const candidates = allCheckingTxs
+        .filter((tx) => tx.amount > 0 && tx.date >= endDate)
+        .sort((a, b) => Math.abs(Math.abs(a.amount) - ccTotal) - Math.abs(Math.abs(b.amount) - ccTotal));
+
+      periods.push({
+        key: `unmatched-${month}`,
+        startDate: sortedMonth[0].date,
+        endDate,
+        ccTransactions: sortedMonth,
+        ccTotal,
+        suggestedPayment: candidates[0] || null,
+        candidates,
+        confirmedPayment: null,
+        bill: null,
+        diffPct: null,
+      });
+    }
   }
 
-  return periods.reverse(); // newest first
+  return periods.sort((a, b) => b.endDate.localeCompare(a.endDate));
 }
 
-function formatDateShort(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString("en-SE", { day: "numeric", month: "short", year: "numeric" });
-}
+// ─── Component ───────────────────────────────────────────────────────────────
 
 export default function CcBillsPage() {
   const supabase = createClient();
   const [userName, setUserName] = useState("");
   const [displayCurrency, setDisplayCurrency] = useState("SEK");
   const [ccAccounts, setCcAccounts] = useState<Account[]>([]);
-  const [mainAccounts, setMainAccounts] = useState<Account[]>([]);
+  const [checkingAccounts, setCheckingAccounts] = useState<Account[]>([]);
   const [allTxs, setAllTxs] = useState<Transaction[]>([]);
   const [bills, setBills] = useState<CreditCardBill[]>([]);
   const [loading, setLoading] = useState(true);
+
   const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
   const [expandedPeriod, setExpandedPeriod] = useState<string | null>(null);
-
-  // Linking state
-  const [linkingPeriod, setLinkingPeriod] = useState<string | null>(null);
-  const [candidatePayments, setCandidatePayments] = useState<Transaction[]>([]);
+  const [confirmingPeriod, setConfirmingPeriod] = useState<string | null>(null);
   const [selectedPaymentId, setSelectedPaymentId] = useState("");
-  const [linking, setLinking] = useState(false);
-  const [exploding, setExploding] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const loadData = async () => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -140,119 +150,87 @@ export default function CcBillsPage() {
       if (profile?.default_currency) setDisplayCurrency(profile.default_currency);
     }
 
-    const { data: accts } = await supabase.from("accounts").select("*").eq("is_active", true);
-    if (!accts) { setLoading(false); return; }
+    const [{ data: accts }, { data: txData }, { data: billData }] = await Promise.all([
+      supabase.from("accounts").select("*").eq("is_active", true),
+      supabase.from("transactions").select("*").order("date"),
+      supabase.from("credit_card_bills").select("*"),
+    ]);
 
-    const ccAccts = accts.filter((a: Account) => a.type === "credit_card");
-    const mainAccts = accts.filter((a: Account) => a.type !== "credit_card");
-    setCcAccounts(ccAccts);
-    setMainAccounts(mainAccts);
-
-    const { data: txs } = await supabase
-      .from("transactions")
-      .select("*")
-      .order("date", { ascending: false });
-
-    if (txs) setAllTxs(txs as Transaction[]);
-
-    const { data: billData } = await supabase.from("credit_card_bills").select("*");
-    if (billData) setBills(billData);
-
-
+    if (accts) {
+      setCcAccounts(accts.filter((a: Account) => a.type === "credit_card"));
+      setCheckingAccounts(accts.filter((a: Account) => a.type !== "credit_card"));
+    }
+    if (txData) setAllTxs(txData as Transaction[]);
+    if (billData) setBills(billData as CreditCardBill[]);
     setLoading(false);
   };
 
   useEffect(() => { loadData(); }, [supabase]);
 
-  const periodsForAccount = (accountId: string): Period[] => {
-    // All CC transactions for this account (all amounts — purchases + refunds)
-    const ccTxs = allTxs.filter((t) => t.account_id === accountId);
-
-    // All known payment transactions linked to this CC account's bills
-    const ccBills = bills.filter((b) => b.credit_card_account_id === accountId);
-    const linkedPayments: Transaction[] = [];
-    for (const b of ccBills) {
-      const payTx = allTxs.find((t) => t.id === b.payment_transaction_id);
-      if (payTx) linkedPayments.push(payTx);
+  const periodsByAccount = useMemo(() => {
+    const result = new Map<string, BillingPeriod[]>();
+    for (const cc of ccAccounts) {
+      const ccTxs = allTxs.filter((t) => t.account_id === cc.id);
+      const ccBills = bills.filter((b) => b.credit_card_account_id === cc.id);
+      const confirmedPayments = allTxs.filter((t) =>
+        ccBills.some((b) => b.payment_transaction_id === t.id)
+      );
+      const checkingTxs = allTxs.filter((t) =>
+        checkingAccounts.some((a) => a.id === t.account_id)
+      );
+      result.set(cc.id, buildBillingPeriods(ccTxs, confirmedPayments, checkingTxs, ccBills));
     }
+    return result;
+  }, [ccAccounts, allTxs, bills, checkingAccounts]);
 
-    return buildPeriods(ccTxs, linkedPayments, ccBills);
-  };
-
-  const handleStartLink = (accountId: string, period: Period) => {
-    const key = `${accountId}:${period.key}`;
-    setLinkingPeriod(key);
-    setSelectedPaymentId("");
-
-    // Candidates: outgoing transactions from main accounts
-    // that come AFTER the last CC transaction in this period
-    // Sorted by closest amount match to the CC total
-    const candidates = allTxs.filter((tx) => {
-      if (mainAccounts.every((a) => a.id !== tx.account_id)) return false;
-      if (tx.date < period.endDate) return false; // payment must come after last CC tx
-      if (tx.amount > 0) return false; // only outgoing (negative = money leaving checking)
-      if (tx.transaction_type === "cc_payment") return true; // already tagged
-      // Also include any large outgoing transactions that could be CC payments
-      return true;
-    });
-
-    candidates.sort((a, b) => {
-      const diffA = Math.abs(Math.abs(a.amount) - period.total);
-      const diffB = Math.abs(Math.abs(b.amount) - period.total);
-      return diffA - diffB;
-    });
-
-    setCandidatePayments(candidates);
-  };
-
-  const handleLinkPayment = async (accountId: string, period: Period) => {
-    if (!selectedPaymentId) return;
-    setLinking(true);
-
-    const paymentTx = candidatePayments.find((t) => t.id === selectedPaymentId);
-    if (!paymentTx) { setLinking(false); return; }
+  const handleConfirmPayment = async (ccAccountId: string, period: BillingPeriod, paymentId: string) => {
+    setSaving(true);
+    const paymentTx = allTxs.find((t) => t.id === paymentId);
+    if (!paymentTx) { setSaving(false); return; }
 
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) { setLinking(false); return; }
+    if (!user) { setSaving(false); return; }
 
-    const billPayload = {
-      payment_transaction_id: selectedPaymentId,
-      total_amount: period.total,
-      statement_start_date: period.startDate,
-      statement_end_date: period.endDate,
-      import_batch_id: null,
-    };
-
-    // Check if a bill already exists for this payment
-    const existingBill = bills.find(
-      (b) => b.credit_card_account_id === accountId && b.payment_transaction_id === selectedPaymentId
-    ) || (period.bill || null);
-
-    if (existingBill) {
-      await supabase.from("credit_card_bills").update(billPayload).eq("id", existingBill.id);
+    if (period.bill) {
+      await supabase.from("credit_card_bills").update({
+        payment_transaction_id: paymentId,
+        total_amount: period.ccTotal,
+        statement_start_date: period.startDate,
+        statement_end_date: period.endDate,
+      }).eq("id", period.bill.id);
     } else {
       await supabase.from("credit_card_bills").insert({
         user_id: user.id,
-        credit_card_account_id: accountId,
+        credit_card_account_id: ccAccountId,
+        payment_transaction_id: paymentId,
+        total_amount: period.ccTotal,
+        statement_start_date: period.startDate,
+        statement_end_date: period.endDate,
         is_exploded: false,
-        ...billPayload,
+        import_batch_id: null,
       });
     }
 
+    // Tag the payment transaction as cc_payment so it's excluded from spending totals
     await supabase.from("transactions")
       .update({ transaction_type: "cc_payment" })
-      .eq("id", selectedPaymentId);
+      .eq("id", paymentId);
 
-    setLinkingPeriod(null);
-    setLinking(false);
+    setConfirmingPeriod(null);
+    setSelectedPaymentId("");
+    setSaving(false);
     await loadData();
   };
 
-  const handleExplode = async (bill: CreditCardBill, payment: Transaction) => {
-    setExploding(bill.id);
-    await supabase.from("transactions").delete().eq("id", payment.id);
-    await supabase.from("credit_card_bills").update({ is_exploded: true }).eq("id", bill.id);
-    setExploding(null);
+  const handleUnlink = async (period: BillingPeriod) => {
+    if (!period.bill) return;
+    // Restore the payment transaction to expense type
+    if (period.confirmedPayment) {
+      await supabase.from("transactions")
+        .update({ transaction_type: "expense" })
+        .eq("id", period.confirmedPayment.id);
+    }
+    await supabase.from("credit_card_bills").delete().eq("id", period.bill.id);
     await loadData();
   };
 
@@ -266,180 +244,197 @@ export default function CcBillsPage() {
 
   return (
     <PageShell userName={userName}>
-      <div className="flex justify-between items-end mb-8">
-        <h1 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight">
-          Credit Card Bills
+      <div className="mb-8">
+        <h1 className="font-sans font-extrabold text-[32px] text-sq-black uppercase tracking-tight mb-2">
+          CC Reconciliation
         </h1>
-        <p className="font-sans text-[13px] text-sq-gray-600">
-          Link a payment to anchor the billing period, then explode to replace with individual charges
-        </p>
+        <div className="border-l-4 border-sq-blue pl-4 py-1 bg-sq-gray-100">
+          <p className="font-sans text-[13px] text-sq-gray-600 leading-relaxed">
+            For each CC billing period, confirm which checking account payment it corresponds to.
+            Once confirmed, that payment is excluded from your spending totals — only the individual CC transactions are counted.
+          </p>
+        </div>
       </div>
 
       {ccAccounts.length === 0 ? (
         <Card className="text-center py-16">
-          <p className="font-sans text-sq-gray-600 text-[15px]">
-            No credit card accounts found. Add one in Accounts.
-          </p>
+          <CreditCard className="w-10 h-10 text-sq-gray-400 mx-auto mb-3" />
+          <p className="font-sans text-sq-gray-600 text-[15px]">No credit card accounts. Add one in Accounts.</p>
         </Card>
       ) : (
         <div className="space-y-6">
-          {ccAccounts.map((ccAcct) => {
-            const periods = periodsForAccount(ccAcct.id);
-            const isOpen = expandedAccount === ccAcct.id;
-            const linkedCount = periods.filter((p) => p.payment).length;
+          {ccAccounts.map((cc) => {
+            const periods = periodsByAccount.get(cc.id) || [];
+            const confirmed = periods.filter((p) => p.confirmedPayment).length;
+            const needsAttention = periods.filter((p) => !p.confirmedPayment || (p.diffPct !== null && p.diffPct > 5)).length;
+            const isOpen = expandedAccount === cc.id;
 
             return (
-              <div key={ccAcct.id} className="border-2 border-sq-black">
+              <div key={cc.id} className="border-2 border-sq-black">
+                {/* Account header */}
                 <button
-                  onClick={() => setExpandedAccount(isOpen ? null : ccAcct.id)}
+                  onClick={() => setExpandedAccount(isOpen ? null : cc.id)}
                   className="w-full flex items-center justify-between px-6 py-4 hover:bg-sq-gray-100 transition-colors"
                 >
                   <div className="flex items-center gap-3">
-                    <CreditCard className="w-5 h-5 text-sq-black" />
-                    <span className="font-sans font-bold text-[16px] text-sq-black">{ccAcct.name}</span>
+                    <CreditCard className="w-5 h-5" />
+                    <span className="font-sans font-bold text-[16px] text-sq-black">{cc.name}</span>
                     <span className="font-sans text-[12px] text-sq-gray-600">
-                      {periods.length} period{periods.length !== 1 ? "s" : ""} · {linkedCount} linked
+                      {confirmed}/{periods.length} confirmed
                     </span>
+                    {needsAttention > 0 && (
+                      <span className="flex items-center gap-1 font-sans text-[11px] text-amber-600 font-semibold">
+                        <AlertTriangle className="w-3 h-3" />
+                        {needsAttention} need{needsAttention === 1 ? "s" : ""} attention
+                      </span>
+                    )}
                   </div>
                   {isOpen ? <ChevronDown className="w-5 h-5" /> : <ChevronRight className="w-5 h-5" />}
                 </button>
 
                 {isOpen && (
-                  <div className="border-t border-sq-black">
+                  <div className="border-t-2 border-sq-black">
+                    {/* Table header */}
                     <div className="grid grid-cols-12 gap-4 px-6 py-2 bg-sq-gray-100 border-b border-sq-black">
-                      <div className="col-span-3 sq-label-muted">Period (actual CC dates)</div>
-                      <div className="col-span-1 sq-label-muted text-right">Txns</div>
-                      <div className="col-span-2 sq-label-muted text-right">CC Total</div>
-                      <div className="col-span-4 sq-label-muted">Payment from checking</div>
-                      <div className="col-span-2 sq-label-muted text-right">Actions</div>
+                      <div className="col-span-3 sq-label-muted">CC Period</div>
+                      <div className="col-span-1 text-right sq-label-muted">Txns</div>
+                      <div className="col-span-2 text-right sq-label-muted">CC Total</div>
+                      <div className="col-span-4 sq-label-muted">Checking Payment</div>
+                      <div className="col-span-2 sq-label-muted text-right">Status</div>
                     </div>
 
-                    {periods.length === 0 && (
-                      <div className="px-6 py-8 text-center font-sans text-[14px] text-sq-gray-600">
-                        No transactions found for this account.
-                      </div>
-                    )}
-
                     {periods.map((period) => {
-                      const periodKey = `${ccAcct.id}:${period.key}`;
-                      const isExpandedPeriod = expandedPeriod === periodKey;
-                      const isLinking = linkingPeriod === periodKey;
-                      const isExploded = period.bill?.is_exploded ?? false;
+                      const periodKey = `${cc.id}:${period.key}`;
+                      const isExpanded = expandedPeriod === periodKey;
+                      const isConfirming = confirmingPeriod === periodKey;
 
-                      const amountDiff = period.payment
-                        ? Math.abs(Math.abs(period.payment.amount) - period.total)
-                        : null;
-                      const amountPct = amountDiff !== null && period.total > 0
-                        ? (amountDiff / period.total) * 100
-                        : null;
-                      const matchQuality = amountPct === null ? null
-                        : amountPct < 1 ? "good"
-                        : amountPct < 5 ? "ok"
-                        : "poor";
+                      const statusIcon = period.confirmedPayment
+                        ? period.diffPct !== null && period.diffPct > 5
+                          ? <span className="text-sq-red text-[11px] font-semibold flex items-center gap-1"><AlertTriangle className="w-3 h-3" />{period.diffPct.toFixed(1)}% diff</span>
+                          : <span className="text-sq-green text-[11px] font-semibold flex items-center gap-1"><Check className="w-3 h-3" />Confirmed</span>
+                        : <span className="text-amber-600 text-[11px] font-semibold flex items-center gap-1"><HelpCircle className="w-3 h-3" />Needs payment</span>;
 
                       return (
-                        <div key={period.key} className={cn(isExploded && "opacity-50")}>
-                          <div className="grid grid-cols-12 gap-4 px-6 py-3 border-b border-sq-gray-100 items-center">
+                        <div key={period.key} className="border-b border-sq-gray-100 last:border-0">
+                          <div className="grid grid-cols-12 gap-4 px-6 py-3 items-center">
+                            {/* Period dates */}
                             <div
                               className="col-span-3 flex items-center gap-1.5 cursor-pointer"
-                              onClick={() => setExpandedPeriod(isExpandedPeriod ? null : periodKey)}
+                              onClick={() => setExpandedPeriod(isExpanded ? null : periodKey)}
                             >
-                              {isExpandedPeriod
+                              {isExpanded
                                 ? <ChevronDown className="w-3.5 h-3.5 text-sq-gray-600 flex-shrink-0" />
-                                : <ChevronRight className="w-3.5 h-3.5 text-sq-gray-600 flex-shrink-0" />
-                              }
-                              <span className="font-sans text-[13px] font-semibold text-sq-black leading-tight">
-                                {period.label}
+                                : <ChevronRight className="w-3.5 h-3.5 text-sq-gray-600 flex-shrink-0" />}
+                              <span className="font-sans text-[13px] font-semibold text-sq-black">
+                                {fmt(period.startDate)} – {fmt(period.endDate)}
                               </span>
                             </div>
 
+                            {/* Txn count */}
                             <div className="col-span-1 text-right font-mono text-[13px] text-sq-gray-600">
-                              {period.transactions.length}
+                              {period.ccTransactions.length}
                             </div>
 
+                            {/* CC total */}
                             <div className="col-span-2 text-right font-mono text-[14px] font-bold text-sq-red">
-                              {formatCurrency(period.total, displayCurrency)}
+                              {formatCurrency(period.ccTotal, displayCurrency)}
                             </div>
 
+                            {/* Payment info */}
                             <div className="col-span-4 font-sans text-[13px]">
-                              {isExploded ? (
-                                <span className="text-sq-green font-semibold">✓ Exploded</span>
-                              ) : period.payment ? (
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="text-sq-black">
-                                    {formatDate(period.payment.date)} · {formatCurrency(Math.abs(period.payment.amount), displayCurrency)}
-                                  </span>
-                                  {matchQuality === "good" && <span className="text-sq-green text-[11px] font-semibold">✓ exact</span>}
-                                  {matchQuality === "ok" && <span className="text-amber-500 text-[11px]">~{amountPct?.toFixed(1)}% diff</span>}
-                                  {matchQuality === "poor" && <span className="text-sq-red text-[11px] font-semibold">⚠ {amountPct?.toFixed(0)}% diff</span>}
+                              {period.confirmedPayment ? (
+                                <div>
+                                  <div className="text-sq-black font-semibold">
+                                    {formatDate(period.confirmedPayment.date)} · {formatCurrency(Math.abs(period.confirmedPayment.amount), displayCurrency)}
+                                  </div>
+                                  <div className="text-sq-gray-400 text-[11px] truncate">{period.confirmedPayment.description}</div>
+                                </div>
+                              ) : period.suggestedPayment ? (
+                                <div>
+                                  <div className="text-sq-gray-600 italic text-[12px]">Suggested:</div>
+                                  <div className="text-sq-black">
+                                    {formatDate(period.suggestedPayment.date)} · {formatCurrency(Math.abs(period.suggestedPayment.amount), displayCurrency)}
+                                  </div>
+                                  <div className="text-sq-gray-400 text-[11px] truncate">{period.suggestedPayment.description}</div>
                                 </div>
                               ) : (
-                                <span className="text-sq-gray-400 italic">Not linked</span>
+                                <span className="text-sq-gray-400 italic">No matching payment found</span>
                               )}
                             </div>
 
-                            <div className="col-span-2 flex justify-end gap-2">
-                              {!isExploded && (
-                                <>
+                            {/* Status + actions */}
+                            <div className="col-span-2 flex flex-col items-end gap-1">
+                              {statusIcon}
+                              <div className="flex gap-1">
+                                {!period.confirmedPayment && period.suggestedPayment && (
                                   <button
-                                    onClick={() => isLinking ? setLinkingPeriod(null) : handleStartLink(ccAcct.id, period)}
-                                    className="flex items-center gap-1 px-3 py-1.5 border border-sq-gray-400 font-sans text-[11px] uppercase font-semibold text-sq-gray-600 hover:border-sq-black hover:text-sq-black transition-colors"
+                                    onClick={() => handleConfirmPayment(cc.id, period, period.suggestedPayment!.id)}
+                                    disabled={saving}
+                                    className="px-2 py-1 bg-sq-black text-sq-white font-sans text-[10px] uppercase font-semibold hover:opacity-80 transition-opacity disabled:opacity-40"
                                   >
-                                    <Link2 className="w-3 h-3" />
-                                    {period.payment ? "Re-link" : "Link"}
+                                    Confirm
                                   </button>
-                                  {period.payment && period.bill && !isExploded && (
-                                    <button
-                                      onClick={() => handleExplode(period.bill!, period.payment!)}
-                                      disabled={exploding === period.bill!.id}
-                                      className="flex items-center gap-1 px-3 py-1.5 border border-sq-black font-sans text-[11px] uppercase font-semibold text-sq-black hover:bg-sq-black hover:text-sq-white transition-colors disabled:opacity-50"
-                                    >
-                                      <Zap className="w-3 h-3" />
-                                      {exploding === period.bill!.id ? "…" : "Explode"}
-                                    </button>
-                                  )}
-                                </>
-                              )}
+                                )}
+                                <button
+                                  onClick={() => {
+                                    setConfirmingPeriod(isConfirming ? null : periodKey);
+                                    setSelectedPaymentId(period.confirmedPayment?.id || period.suggestedPayment?.id || "");
+                                  }}
+                                  className="px-2 py-1 border border-sq-gray-400 font-sans text-[10px] uppercase font-semibold text-sq-gray-600 hover:border-sq-black hover:text-sq-black transition-colors"
+                                >
+                                  {period.confirmedPayment ? "Change" : "Select"}
+                                </button>
+                                {period.confirmedPayment && (
+                                  <button
+                                    onClick={() => handleUnlink(period)}
+                                    className="px-2 py-1 border border-sq-gray-400 font-sans text-[10px] uppercase font-semibold text-sq-red hover:border-sq-red transition-colors"
+                                  >
+                                    Unlink
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           </div>
 
-                          {/* Link payment UI */}
-                          {isLinking && (
-                            <div className="bg-sq-gray-100 border-b border-sq-black px-8 py-4">
-                              <div className="sq-label-muted mb-1">
-                                CC total: <strong>{formatCurrency(period.total, displayCurrency)}</strong>
-                                <span className="ml-2 text-sq-gray-400">· candidates sorted by closest amount, must be on or after {formatDate(period.endDate)}</span>
+                          {/* Manual payment picker */}
+                          {isConfirming && (
+                            <div className="bg-sq-gray-100 border-t border-sq-gray-100 px-8 py-4">
+                              <div className="sq-label-muted mb-2">
+                                CC total: <strong>{formatCurrency(period.ccTotal, displayCurrency)}</strong>
+                                <span className="ml-2 text-sq-gray-400">· select the payment from your checking account</span>
                               </div>
-                              {candidatePayments.length === 0 ? (
-                                <p className="font-sans text-[13px] text-sq-gray-600 mt-2">
-                                  No outgoing payments found in checking accounts after {formatDate(period.endDate)}.
+                              {period.candidates.length === 0 ? (
+                                <p className="font-sans text-[13px] text-sq-gray-600">
+                                  No expenses found in checking accounts on or after {formatDate(period.endDate)}.
                                 </p>
                               ) : (
-                                <div className="flex items-end gap-3 mt-2">
-                                  <div className="flex-1">
-                                    <select
-                                      value={selectedPaymentId}
-                                      onChange={(e) => setSelectedPaymentId(e.target.value)}
-                                      className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none bg-white"
-                                    >
-                                      <option value="">Select payment…</option>
-                                      {candidatePayments.map((tx) => {
-                                        const acctName = mainAccounts.find((a) => a.id === tx.account_id)?.name || "";
-                                        const diff = Math.abs(Math.abs(tx.amount) - period.total);
-                                        const pct = period.total > 0 ? (diff / period.total * 100).toFixed(1) : "?";
-                                        const tag = diff < 1 ? "✓ exact" : `${pct}% diff`;
-                                        return (
-                                          <option key={tx.id} value={tx.id}>
-                                            {formatDate(tx.date)} · {tx.description} · {formatCurrency(Math.abs(tx.amount), displayCurrency)} [{tag}] ({acctName})
-                                          </option>
-                                        );
-                                      })}
-                                    </select>
-                                  </div>
-                                  <Button size="sm" onClick={() => handleLinkPayment(ccAcct.id, period)} disabled={!selectedPaymentId || linking}>
-                                    {linking ? "Linking…" : "Confirm"}
+                                <div className="flex items-center gap-3">
+                                  <select
+                                    value={selectedPaymentId}
+                                    onChange={(e) => setSelectedPaymentId(e.target.value)}
+                                    className="flex-1 border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none bg-white"
+                                  >
+                                    <option value="">Select payment…</option>
+                                    {period.candidates.map((tx) => {
+                                      const acct = checkingAccounts.find((a) => a.id === tx.account_id)?.name || "";
+                                      const diff = Math.abs(Math.abs(tx.amount) - period.ccTotal);
+                                      const pct = period.ccTotal > 0 ? (diff / period.ccTotal * 100).toFixed(1) : "?";
+                                      const tag = diff < 1 ? "✓ exact match" : `${pct}% diff`;
+                                      return (
+                                        <option key={tx.id} value={tx.id}>
+                                          {formatDate(tx.date)} · {tx.description} · {formatCurrency(Math.abs(tx.amount), displayCurrency)} [{tag}] ({acct})
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                  <Button
+                                    size="sm"
+                                    onClick={() => selectedPaymentId && handleConfirmPayment(cc.id, period, selectedPaymentId)}
+                                    disabled={!selectedPaymentId || saving}
+                                  >
+                                    {saving ? "Saving…" : "Confirm"}
                                   </Button>
-                                  <Button size="sm" variant="ghost" onClick={() => setLinkingPeriod(null)}>
+                                  <Button size="sm" variant="ghost" onClick={() => setConfirmingPeriod(null)}>
                                     Cancel
                                   </Button>
                                 </div>
@@ -447,10 +442,10 @@ export default function CcBillsPage() {
                             </div>
                           )}
 
-                          {/* Expanded transaction list */}
-                          {isExpandedPeriod && (
-                            <div className="border-b border-sq-black">
-                              {period.transactions.map((tx) => (
+                          {/* Expanded CC transaction list */}
+                          {isExpanded && (
+                            <div className="border-t border-sq-gray-100">
+                              {period.ccTransactions.map((tx) => (
                                 <div key={tx.id} className="grid grid-cols-12 gap-4 px-10 py-2 border-b border-sq-gray-100 items-center last:border-0">
                                   <div className="col-span-2 font-mono text-[12px] text-sq-gray-600">{formatDate(tx.date)}</div>
                                   <div className="col-span-7 font-sans text-[13px] text-sq-black">{tx.description}</div>
@@ -461,10 +456,10 @@ export default function CcBillsPage() {
                               ))}
                               <div className="grid grid-cols-12 gap-4 px-10 py-2 bg-sq-gray-100 border-t border-sq-black">
                                 <div className="col-span-9 font-sans text-[11px] uppercase font-bold tracking-wider text-sq-gray-600">
-                                  Total ({period.transactions.length} transactions)
+                                  Total ({period.ccTransactions.length} transactions)
                                 </div>
                                 <div className="col-span-3 text-right font-mono text-[13px] font-bold text-sq-red">
-                                  {formatCurrency(period.total, displayCurrency)}
+                                  {formatCurrency(period.ccTotal, displayCurrency)}
                                 </div>
                               </div>
                             </div>
