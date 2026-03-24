@@ -11,6 +11,7 @@ import {
   ChevronRight,
   FileText,
   ArrowLeft,
+  Download,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Select } from "@/components/ui";
@@ -97,6 +98,8 @@ export default function ImportPage() {
 
   // ─── Step 1: Upload ──────────────────────────
   const [isXlsxFormat, setIsXlsxFormat] = useState(false);
+  const [fakturaMonth, setFakturaMonth] = useState("");      // e.g. "april 2025"
+  const [fakturaCsvData, setFakturaCsvData] = useState(""); // normalized CSV string for download
 
   // When account changes, check if we have a saved mapping
   const handleAccountChange = (accountId: string) => {
@@ -181,6 +184,19 @@ export default function ImportPage() {
     }
   };
 
+  // ─── Download normalized Faktura CSV ────────────────────
+  const handleDownloadFakturaCSV = () => {
+    if (!fakturaCsvData) return;
+    const slug = fakturaMonth.toLowerCase().replace(/\s+/g, "-") || "faktura";
+    const blob = new Blob(["\uFEFF" + fakturaCsvData], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${slug}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // ─── XLSX Parser (Fakturadetaljer / Swedish CC format) ───
   const parseXLSX = (file: File) => {
     const reader = new FileReader();
@@ -195,12 +211,63 @@ export default function ImportPage() {
       );
 
       if (isFaktura) {
-        const txRows = allRows.filter((row) => {
-          const dateStr = String(row[0] || "");
-          const amount = row[6];
-          return /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && typeof amount === "number";
-        });
+        // ── Extract month name from "Månad" row for CSV filename ──
+        const manadRow = allRows.find((row) => String(row[0]).trim() === "Månad");
+        const manad = manadRow ? String(manadRow[6] || "").trim() : "";
 
+        // ── Only take rows from the "Köp/uttag" section ──────────
+        // The file has two sections:
+        //   "Totalt övriga händelser" — contains Inbetalning, Ränta, Saldo (skip)
+        //   "Köp/uttag"              — actual purchases and refunds (keep)
+        const kopIdx = allRows.findIndex((row) => String(row[0]).trim() === "Köp/uttag");
+        let txRows: (string | number)[][];
+        if (kopIdx >= 0) {
+          // Find the Datum/Bokfört header row inside the Köp/uttag section
+          const headerIdx = allRows.findIndex(
+            (row, i) => i > kopIdx && String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
+          );
+          const startIdx = headerIdx >= 0 ? headerIdx + 1 : kopIdx + 2;
+          txRows = allRows.slice(startIdx).filter((row) => {
+            const col0 = String(row[0] || "");
+            if (!(/^\d{4}-\d{2}-\d{2}$/.test(col0))) return false; // must be a date
+            if (typeof row[6] !== "number") return false;           // must have SEK amount
+            return true;
+          });
+        } else {
+          // Fallback for files without "Köp/uttag" header: filter by date+amount
+          // and explicitly exclude non-transaction rows
+          txRows = allRows.filter((row) => {
+            const dateStr = String(row[0] || "");
+            if (!(/^\d{4}-\d{2}-\d{2}$/.test(dateStr))) return false;
+            if (typeof row[6] !== "number") return false;
+            const desc = String(row[2] || "").toLowerCase().trim();
+            if (desc === "inbetalning") return false;
+            if (desc.startsWith("ränta") || desc.startsWith("dröjsmål")) return false;
+            return true;
+          });
+        }
+
+        // ── Build normalized CSV for download ────────────────────
+        const csvLines = [
+          "Datum,Bokfört,Specifikation,Ort,Valuta,Utl. belopp,Belopp",
+          ...txRows.map((row) => {
+            const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+            const utlBelopp = typeof row[5] === "number" && row[5] !== 0 ? String(row[5]) : "";
+            return [
+              String(row[0]),
+              String(row[1]),
+              esc(String(row[2])),
+              esc(String(row[3])),
+              String(row[4] || "SEK"),
+              utlBelopp,
+              String(row[6]),
+            ].join(",");
+          }),
+        ];
+        setFakturaMonth(manad);
+        setFakturaCsvData(csvLines.join("\n"));
+
+        // ── Map into the 6-column format used by the import flow ─
         const h = ["Datum", "Bokfört", "Beskrivning", "Ort", "Valuta", "Belopp"];
         const r = txRows.map((row) => [
           String(row[0]),
@@ -224,7 +291,7 @@ export default function ImportPage() {
         setRows(r);
         setIsXlsxFormat(true);
         setMapping(fakturaMapping);
-        setSavedMappingLoaded(false); // Faktura is always auto-detected, not "saved"
+        setSavedMappingLoaded(false);
       } else {
         // Generic XLSX
         setIsXlsxFormat(false);
@@ -399,6 +466,26 @@ export default function ImportPage() {
               </tbody>
             </table>
           </div>
+
+          {isXlsxFormat && fakturaCsvData && (
+            <div className="mt-4 flex items-center gap-3 p-3 bg-sq-gray-100 border border-sq-black">
+              <div className="flex-1">
+                <div className="font-sans font-semibold text-[13px] text-sq-black">
+                  Normalized CSV ready
+                </div>
+                <div className="font-sans text-[12px] text-sq-gray-600">
+                  {rows.length} transactions from <span className="font-semibold">{fakturaMonth || "this statement"}</span> — Inbetalning &amp; Ränta excluded
+                </div>
+              </div>
+              <button
+                onClick={handleDownloadFakturaCSV}
+                className="flex items-center gap-1.5 px-3 py-2 border-2 border-sq-black font-sans font-semibold text-[12px] uppercase tracking-wider hover:bg-sq-black hover:text-sq-white transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download {fakturaMonth ? `${fakturaMonth.replace(" ", "-")}.csv` : "CSV"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
