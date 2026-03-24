@@ -820,7 +820,7 @@ export default function ImportPage() {
       // Apply auto-rules for this batch
       try {
         const stored = localStorage.getItem("sq_auto_rules");
-        const autoRules: { keyword: string; markShared: boolean; categoryId: string }[] = stored ? JSON.parse(stored) : [];
+        const autoRules: { keyword: string; markShared: boolean; markInternalTransfer?: boolean; categoryId: string }[] = stored ? JSON.parse(stored) : [];
         if (autoRules.length > 0 && successCount > 0) {
           const { data: newTxs } = await supabase.from("transactions").select("id, description").eq("import_batch_id", batch.id);
           if (newTxs) {
@@ -831,6 +831,7 @@ export default function ImportPage() {
               const patch: Record<string, unknown> = {};
               if (rule.markShared) { patch.is_shared = true; patch.reimbursement_status = "pending"; }
               if (rule.categoryId) patch.category_id = rule.categoryId;
+              if (rule.markInternalTransfer) patch.transaction_type = "internal_transfer";
               if (Object.keys(patch).length > 0) await supabase.from("transactions").update(patch).in("id", matchIds);
             }
           }

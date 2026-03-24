@@ -28,6 +28,7 @@ interface AutoRule {
   id: string;
   keyword: string;
   markShared: boolean;
+  markInternalTransfer: boolean;
   categoryId: string;
 }
 
@@ -84,6 +85,7 @@ export default function SettingsPage() {
   const [newKeyword, setNewKeyword] = useState("");
   const [newRuleCategoryId, setNewRuleCategoryId] = useState("");
   const [newRuleShared, setNewRuleShared] = useState(false);
+  const [newRuleInternalTransfer, setNewRuleInternalTransfer] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -221,12 +223,14 @@ export default function SettingsPage() {
       id: crypto.randomUUID(),
       keyword: newKeyword.trim(),
       markShared: newRuleShared,
+      markInternalTransfer: newRuleInternalTransfer,
       categoryId: newRuleCategoryId,
     };
     saveAutoRules([...autoRules, rule]);
     setNewKeyword("");
     setNewRuleCategoryId("");
     setNewRuleShared(false);
+    setNewRuleInternalTransfer(false);
     toast("Rule added");
   };
 
@@ -239,18 +243,20 @@ export default function SettingsPage() {
   const [editRuleKeyword, setEditRuleKeyword] = useState("");
   const [editRuleCategoryId, setEditRuleCategoryId] = useState("");
   const [editRuleShared, setEditRuleShared] = useState(false);
+  const [editRuleInternalTransfer, setEditRuleInternalTransfer] = useState(false);
 
   const startEditRule = (rule: AutoRule) => {
     setEditingRuleId(rule.id);
     setEditRuleKeyword(rule.keyword);
     setEditRuleCategoryId(rule.categoryId);
     setEditRuleShared(rule.markShared);
+    setEditRuleInternalTransfer(rule.markInternalTransfer ?? false);
   };
 
   const handleSaveRule = (id: string) => {
     if (!editRuleKeyword.trim()) return;
     saveAutoRules(autoRules.map((r) =>
-      r.id === id ? { ...r, keyword: editRuleKeyword.trim(), categoryId: editRuleCategoryId, markShared: editRuleShared } : r
+      r.id === id ? { ...r, keyword: editRuleKeyword.trim(), categoryId: editRuleCategoryId, markShared: editRuleShared, markInternalTransfer: editRuleInternalTransfer } : r
     ));
     setEditingRuleId(null);
     toast("Rule updated");
@@ -453,13 +459,13 @@ export default function SettingsPage() {
   const renderRules = () => (
     <div>
       <p className="font-sans text-[14px] text-sq-gray-600 mb-6">
-        Rules are applied from the Transactions page. Each rule matches on description keyword (case-insensitive) and can auto-categorize and/or mark expenses as shared.
+        Rules are applied on import and from the Transactions page. Each rule matches on description keyword (case-insensitive) and can auto-categorize, mark as shared, and/or mark as internal transfer.
       </p>
 
       {/* Add new rule */}
       <Card className="mb-6">
         <div className="font-sans font-bold text-[13px] uppercase tracking-wider text-sq-black mb-4">New Rule</div>
-        <div className="grid grid-cols-3 gap-4 mb-4 items-end">
+        <div className="grid grid-cols-4 gap-4 mb-4 items-end">
           <div>
             <label className="block sq-label mb-2">Keyword (description contains)</label>
             <input
@@ -495,6 +501,18 @@ export default function SettingsPage() {
               {newRuleShared ? "Shared — Yes" : "Not Shared"}
             </button>
           </div>
+          <div>
+            <label className="block sq-label mb-2">Mark as Internal Transfer</label>
+            <button
+              onClick={() => setNewRuleInternalTransfer(!newRuleInternalTransfer)}
+              className={cn(
+                "w-full border-2 py-2 font-sans font-semibold text-[12px] uppercase tracking-wider transition-colors",
+                newRuleInternalTransfer ? "bg-sq-blue text-sq-white border-sq-blue" : "border-sq-black text-sq-black hover:bg-sq-gray-100"
+              )}
+            >
+              {newRuleInternalTransfer ? "Internal — Yes" : "Not Internal"}
+            </button>
+          </div>
         </div>
         <Button size="sm" onClick={handleAddRule} disabled={!newKeyword.trim()}>
           <Plus className="w-3 h-3" /> Add Rule
@@ -510,9 +528,10 @@ export default function SettingsPage() {
       ) : (
         <div className="border border-sq-black">
           <div className="grid grid-cols-12 gap-4 px-4 py-2 bg-sq-gray-100 border-b border-sq-black">
-            <div className="col-span-4 sq-label-muted">Keyword</div>
-            <div className="col-span-4 sq-label-muted">Category</div>
+            <div className="col-span-3 sq-label-muted">Keyword</div>
+            <div className="col-span-3 sq-label-muted">Category</div>
             <div className="col-span-2 sq-label-muted">Shared</div>
+            <div className="col-span-2 sq-label-muted">Internal Transfer</div>
             <div className="col-span-2 sq-label-muted" />
           </div>
           {autoRules.map((rule) => {
@@ -521,7 +540,7 @@ export default function SettingsPage() {
             if (isEditingThis) {
               return (
                 <div key={rule.id} className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-sq-gray-100 items-center bg-sq-gray-100">
-                  <div className="col-span-4">
+                  <div className="col-span-3">
                     <input
                       autoFocus
                       value={editRuleKeyword}
@@ -529,7 +548,7 @@ export default function SettingsPage() {
                       className="w-full border-2 border-sq-black px-2 py-1 font-mono text-[13px] outline-none focus:border-sq-blue bg-white"
                     />
                   </div>
-                  <div className="col-span-4">
+                  <div className="col-span-3">
                     <select
                       value={editRuleCategoryId}
                       onChange={(e) => setEditRuleCategoryId(e.target.value)}
@@ -549,6 +568,14 @@ export default function SettingsPage() {
                       {editRuleShared ? "Yes" : "No"}
                     </button>
                   </div>
+                  <div className="col-span-2">
+                    <button
+                      onClick={() => setEditRuleInternalTransfer(!editRuleInternalTransfer)}
+                      className={`border-2 px-2 py-1 font-sans text-[11px] uppercase font-semibold transition-colors ${editRuleInternalTransfer ? "bg-sq-blue text-white border-sq-blue" : "border-sq-black text-sq-black hover:bg-sq-gray-100"}`}
+                    >
+                      {editRuleInternalTransfer ? "Yes" : "No"}
+                    </button>
+                  </div>
                   <div className="col-span-2 flex justify-end gap-2">
                     <button onClick={() => handleSaveRule(rule.id)} className="text-sq-blue hover:text-sq-black" title="Save">
                       <Check className="w-4 h-4" />
@@ -562,8 +589,8 @@ export default function SettingsPage() {
             }
             return (
               <div key={rule.id} className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-sq-gray-100 items-center">
-                <div className="col-span-4 font-mono text-[13px] text-sq-black">{rule.keyword}</div>
-                <div className="col-span-4 font-sans text-[13px] text-sq-gray-600">
+                <div className="col-span-3 font-mono text-[13px] text-sq-black">{rule.keyword}</div>
+                <div className="col-span-3 font-sans text-[13px] text-sq-gray-600">
                   {cat ? (
                     <span className="flex items-center gap-1.5">
                       <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: cat.color || "#D4D4D4" }} />
@@ -572,9 +599,10 @@ export default function SettingsPage() {
                   ) : "—"}
                 </div>
                 <div className="col-span-2 font-sans text-[12px]">
-                  {rule.markShared ? (
-                    <span className="text-amber-600 font-semibold">Yes</span>
-                  ) : "—"}
+                  {rule.markShared ? <span className="text-amber-600 font-semibold">Yes</span> : "—"}
+                </div>
+                <div className="col-span-2 font-sans text-[12px]">
+                  {rule.markInternalTransfer ? <span className="text-sq-blue font-semibold">Yes</span> : "—"}
                 </div>
                 <div className="col-span-2 flex justify-end gap-2">
                   <button onClick={() => startEditRule(rule)} className="text-sq-gray-400 hover:text-sq-black" title="Edit">

@@ -16,6 +16,7 @@ interface AutoRule {
   id: string;
   keyword: string;
   markShared: boolean;
+  markInternalTransfer?: boolean;
   categoryId: string;
 }
 
