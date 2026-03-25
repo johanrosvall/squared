@@ -54,6 +54,8 @@ export interface Account {
   created_at: string;
 }
 
+export type CategoryDirection = "expense" | "income" | "transfer";
+
 export interface Category {
   id: string;
   user_id: string;
@@ -61,6 +63,10 @@ export interface Category {
   parent_id: string | null;
   color: string | null;
   is_shared: boolean;
+  direction: CategoryDirection | null;
+  is_system: boolean;
+  is_archived: boolean;
+  sort_order: number;
   created_at: string;
 }
 
@@ -87,6 +93,7 @@ export interface Transaction {
   description: string;
   raw_description: string;
   category_id: string | null;
+  subcategory_id: string | null;
   is_shared: boolean;
   reimbursement_status: ReimbursementStatus;
   transaction_type: TransactionType;

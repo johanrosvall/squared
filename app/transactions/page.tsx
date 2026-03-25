@@ -71,7 +71,7 @@ export default function TransactionsPage() {
     // Fetch all categorized transactions to build a description → category map
     const { data: categorized } = await supabase
       .from("transactions")
-      .select("description, category_id")
+      .select("description, category_id, subcategory_id")
       .not("category_id", "is", null);
 
     if (!categorized || categorized.length === 0) {
@@ -80,39 +80,36 @@ export default function TransactionsPage() {
       return;
     }
 
-    // Build frequency map: description (lowercase) → most common category_id
+    // Build frequency map: description → most common {category_id, subcategory_id}
     const freq = new Map<string, Map<string, number>>();
     for (const tx of categorized) {
       const key = tx.description.toLowerCase().trim();
+      const combo = `${tx.category_id}|${tx.subcategory_id || ""}`;
       if (!freq.has(key)) freq.set(key, new Map());
       const m = freq.get(key)!;
-      m.set(tx.category_id, (m.get(tx.category_id) || 0) + 1);
+      m.set(combo, (m.get(combo) || 0) + 1);
     }
-    const descToCategory = new Map<string, string>();
+    const descToIds = new Map<string, { catId: string; subId: string | null }>();
     freq.forEach((counts, desc) => {
-      const best = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0];
-      descToCategory.set(desc, best[0]);
+      const [best] = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+      const [catId, subId] = best[0].split("|");
+      descToIds.set(desc, { catId, subId: subId || null });
     });
 
     // Find uncategorized transactions in current view and apply matches
     const uncategorized = transactions.filter((t) => !t.category_id);
-    const descToCatEntries = Array.from(descToCategory.entries());
+    const descToIdsEntries = Array.from(descToIds.entries());
     let updated = 0;
     for (const tx of uncategorized) {
       const key = tx.description.toLowerCase().trim();
-      // Exact match first
-      let catId = descToCategory.get(key);
-      // Substring match: check if any known description is contained in this one or vice versa
-      if (!catId) {
-        for (const [desc, cId] of descToCatEntries) {
-          if (key.includes(desc) || desc.includes(key)) {
-            catId = cId;
-            break;
-          }
+      let match = descToIds.get(key);
+      if (!match) {
+        for (const [desc, ids] of descToIdsEntries) {
+          if (key.includes(desc) || desc.includes(key)) { match = ids; break; }
         }
       }
-      if (catId) {
-        await supabase.from("transactions").update({ category_id: catId }).eq("id", tx.id);
+      if (match) {
+        await supabase.from("transactions").update({ category_id: match.catId, subcategory_id: match.subId }).eq("id", tx.id);
         updated++;
       }
     }
@@ -229,7 +226,7 @@ export default function TransactionsPage() {
       }
       const { data: accts } = await supabase.from("accounts").select("*").eq("is_active", true).order("name");
       if (accts) setAccounts(accts);
-      const { data: cats } = await supabase.from("categories").select("*").order("name");
+      const { data: cats } = await supabase.from("categories").select("*").order("sort_order").order("name");
       if (cats) setCategories(cats);
       const { data: bills } = await supabase.from("credit_card_bills").select("*");
       if (bills) setCcBills(bills);
@@ -461,7 +458,7 @@ export default function TransactionsPage() {
             className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue"
           >
             <option value="">All Categories</option>
-            {categories.map((c) => (
+            {categories.filter((c) => !c.parent_id).map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
@@ -795,10 +792,21 @@ function TransactionDetailPanel({
   onOpenCcModal: () => void;
 }) {
   const { toast } = useToast();
+  const topLevelCats = categories.filter((c) => !c.parent_id && !c.is_archived);
   const [categoryId, setCategoryId] = useState(tx.category_id || "");
+  const [subcategoryId, setSubcategoryId] = useState(tx.subcategory_id || "");
   const [isShared, setIsShared] = useState(tx.is_shared);
   const [notes, setNotes] = useState(tx.notes || "");
   const [saving, setSaving] = useState(false);
+
+  const availableSubs = categoryId
+    ? categories.filter((c) => c.parent_id === categoryId && !c.is_archived)
+    : [];
+
+  const handleCategoryChange = (newCatId: string) => {
+    setCategoryId(newCatId);
+    setSubcategoryId(""); // reset subcategory when parent changes
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -806,6 +814,7 @@ function TransactionDetailPanel({
       .from("transactions")
       .update({
         category_id: categoryId || null,
+        subcategory_id: subcategoryId || null,
         is_shared: isShared,
         notes: notes || null,
         reimbursement_status: isShared ? "pending" : "none",
@@ -838,19 +847,34 @@ function TransactionDetailPanel({
 
         {/* Middle: Categorization */}
         <div>
-          <div className="mb-4">
+          <div className="mb-3">
             <label className="block sq-label-muted mb-1">Category</label>
             <select
               value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
+              onChange={(e) => handleCategoryChange(e.target.value)}
               className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-sq-white"
             >
-              <option value="">Uncategorized</option>
-              {categories.map((c) => (
+              <option value="">— Select category —</option>
+              {topLevelCats.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
             </select>
           </div>
+          {categoryId && (
+            <div className="mb-4">
+              <label className="block sq-label-muted mb-1">Subcategory</label>
+              <select
+                value={subcategoryId}
+                onChange={(e) => setSubcategoryId(e.target.value)}
+                className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-sq-white"
+              >
+                <option value="">— Select subcategory —</option>
+                {availableSubs.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="mb-4">
             <label className="block sq-label-muted mb-1">Shared Expense</label>
             <button

@@ -16,13 +16,17 @@ import {
   Heart,
   Check,
   X,
+  ChevronRight,
+  ChevronDown,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { PageShell } from "@/components/layout/PageShell";
 import { Button, Card, Input, Select, useToast } from "@/components/ui";
 import { Badge } from "@/components/ui/Badge";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
-import type { Contact, Category } from "@/lib/types";
+import type { Contact, Category, CategoryDirection } from "@/lib/types";
 
 interface AutoRule {
   id: string;
@@ -78,7 +82,12 @@ export default function SettingsPage() {
 
   // Categories
   const [categories, setCategories] = useState<Category[]>([]);
-  const [editingCategory, setEditingCategory] = useState<Partial<Category> | null>(null);
+  const [catTab, setCatTab] = useState<CategoryDirection>("expense");
+  const [expandedCatId, setExpandedCatId] = useState<string | null>(null);
+  const [addSubForCat, setAddSubForCat] = useState<string | null>(null);
+  const [newSubName, setNewSubName] = useState("");
+  const [addingTopLevel, setAddingTopLevel] = useState(false);
+  const [newTopLevelName, setNewTopLevelName] = useState("");
 
   // Auto rules (localStorage)
   const [autoRules, setAutoRules] = useState<AutoRule[]>([]);
@@ -104,7 +113,7 @@ export default function SettingsPage() {
       const { data: cts } = await supabase.from("contacts").select("*").order("name");
       if (cts) setContacts(cts);
 
-      const { data: cats } = await supabase.from("categories").select("*").order("name");
+      const { data: cats } = await supabase.from("categories").select("*").order("sort_order").order("name");
       if (cats) setCategories(cats);
 
       try {
@@ -175,40 +184,6 @@ export default function SettingsPage() {
     if (!confirm("Delete this contact?")) return;
     await supabase.from("contacts").delete().eq("id", id);
     setContacts((c) => c.filter((x) => x.id !== id));
-  };
-
-  // ─── Category CRUD ───────────────────────────
-  const handleDeleteCategory = async (id: string) => {
-    if (!confirm("Delete this category? Transactions using it will become uncategorized.")) return;
-    await supabase.from("categories").delete().eq("id", id);
-    setCategories((c) => c.filter((x) => x.id !== id));
-    toast("Category deleted");
-  };
-
-  const handleSaveCategory = async () => {
-    if (!editingCategory?.name) return;
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-
-    if (editingCategory.id) {
-      await supabase.from("categories").update({
-        name: editingCategory.name,
-        color: editingCategory.color || null,
-        is_shared: editingCategory.is_shared || false,
-      }).eq("id", editingCategory.id);
-    } else {
-      await supabase.from("categories").insert({
-        user_id: user.id,
-        name: editingCategory.name,
-        color: editingCategory.color || "#D4D4D4",
-        is_shared: editingCategory.is_shared || false,
-      });
-    }
-
-    setEditingCategory(null);
-    toast(editingCategory.id ? "Category updated" : "Category added");
-    const { data } = await supabase.from("categories").select("*").order("name");
-    if (data) setCategories(data);
   };
 
   // ─── Auto rule CRUD ───────────────────────────
@@ -375,86 +350,201 @@ export default function SettingsPage() {
     </div>
   );
 
-  const handleSeedCategories = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-    const { error } = await supabase.rpc("seed_default_categories", { p_user_id: user.id });
-    if (error) { toast(`Failed to seed: ${error.message}`, "error"); return; }
-    const { data: cats } = await supabase.from("categories").select("*").order("name");
+  const fetchCategories = async () => {
+    const { data: cats } = await supabase.from("categories").select("*").order("sort_order").order("name");
     if (cats) setCategories(cats);
-    toast("Default categories added");
   };
 
-  const renderCategories = () => (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <p className="font-sans text-[14px] text-sq-gray-600">Manage expense categories.</p>
-        <div className="flex gap-2">
-          {categories.length === 0 && (
-            <Button size="sm" variant="secondary" onClick={handleSeedCategories}>
-              Seed Defaults
-            </Button>
+  const handleToggleArchived = async (cat: Category) => {
+    await supabase.from("categories").update({ is_archived: !cat.is_archived }).eq("id", cat.id);
+    fetchCategories();
+  };
+
+  const handleDeleteCategory = async (id: string) => {
+    if (!confirm("Delete this category? Any transactions using it will become uncategorized.")) return;
+    await supabase.from("categories").delete().eq("id", id);
+    fetchCategories();
+    toast("Category deleted");
+  };
+
+  const handleAddSubcategory = async (parentId: string, parentDirection: CategoryDirection | null, parentColor: string | null) => {
+    if (!newSubName.trim()) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    await supabase.from("categories").insert({
+      user_id: user.id,
+      name: newSubName.trim(),
+      parent_id: parentId,
+      direction: parentDirection,
+      color: parentColor || "#D4D4D4",
+      is_system: false,
+      sort_order: 999,
+      is_shared: false,
+    });
+    setNewSubName("");
+    setAddSubForCat(null);
+    fetchCategories();
+    toast("Subcategory added");
+  };
+
+  const handleAddTopLevel = async () => {
+    if (!newTopLevelName.trim()) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    await supabase.from("categories").insert({
+      user_id: user.id,
+      name: newTopLevelName.trim(),
+      parent_id: null,
+      direction: catTab,
+      color: "#D4D4D4",
+      is_system: false,
+      sort_order: 999,
+      is_shared: false,
+    });
+    setNewTopLevelName("");
+    setAddingTopLevel(false);
+    fetchCategories();
+    toast("Category added");
+  };
+
+  const renderCategories = () => {
+    const topLevel = categories.filter((c) => !c.parent_id && c.direction === catTab);
+    const subsOf = (parentId: string) => categories.filter((c) => c.parent_id === parentId);
+
+    return (
+      <div>
+        {/* Direction tabs */}
+        <div className="flex gap-0 mb-6 border-2 border-sq-black w-fit">
+          {(["expense", "income", "transfer"] as CategoryDirection[]).map((dir) => (
+            <button
+              key={dir}
+              onClick={() => { setCatTab(dir); setExpandedCatId(null); setAddingTopLevel(false); }}
+              className={cn(
+                "px-5 py-2 font-sans font-semibold text-[11px] uppercase tracking-wider transition-colors",
+                catTab === dir ? "bg-sq-black text-sq-white" : "text-sq-gray-600 hover:text-sq-black"
+              )}
+            >
+              {dir}
+            </button>
+          ))}
+        </div>
+
+        {/* Two-level tree */}
+        <div className="border-2 border-sq-black mb-4">
+          {topLevel.length === 0 && (
+            <div className="px-6 py-8 text-center font-sans text-[14px] text-sq-gray-400">No categories yet.</div>
           )}
-          <Button size="sm" onClick={() => setEditingCategory({ color: "#D4D4D4", is_shared: false })}>
+          {topLevel.map((cat) => {
+            const isExpanded = expandedCatId === cat.id;
+            const subs = subsOf(cat.id);
+            const visibleCount = subs.filter((s) => !s.is_archived).length;
+            return (
+              <div key={cat.id} className="border-b border-sq-gray-100 last:border-0">
+                {/* Top-level row */}
+                <div
+                  className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-sq-gray-100 transition-colors"
+                  onClick={() => setExpandedCatId(isExpanded ? null : cat.id)}
+                >
+                  {isExpanded
+                    ? <ChevronDown className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
+                    : <ChevronRight className="w-4 h-4 text-sq-gray-600 flex-shrink-0" />
+                  }
+                  <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color || "#D4D4D4" }} />
+                  <span className="font-sans font-semibold text-[14px] text-sq-black flex-1">{cat.name}</span>
+                  <span className="font-sans text-[11px] text-sq-gray-400 mr-3">{visibleCount} subcategories</span>
+                  {!cat.is_system && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteCategory(cat.id); }}
+                      className="text-sq-gray-400 hover:text-sq-red transition-colors ml-1"
+                      title="Delete category"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Subcategories */}
+                {isExpanded && (
+                  <div className="bg-sq-gray-100 border-t border-sq-gray-100">
+                    {subs.map((sub) => (
+                      <div
+                        key={sub.id}
+                        className={cn(
+                          "flex items-center gap-3 px-8 py-2.5 border-b border-sq-gray-100 last:border-0",
+                          sub.is_archived && "opacity-40"
+                        )}
+                      >
+                        <span className="font-sans text-[13px] text-sq-black flex-1">{sub.name}</span>
+                        <button
+                          onClick={() => handleToggleArchived(sub)}
+                          className="text-sq-gray-400 hover:text-sq-black transition-colors"
+                          title={sub.is_archived ? "Show" : "Hide"}
+                        >
+                          {sub.is_archived ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                        </button>
+                        {!sub.is_system && (
+                          <button
+                            onClick={() => handleDeleteCategory(sub.id)}
+                            className="text-sq-gray-400 hover:text-sq-red transition-colors"
+                            title="Delete"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+
+                    {/* Add subcategory */}
+                    {addSubForCat === cat.id ? (
+                      <div className="flex items-center gap-2 px-8 py-2.5">
+                        <input
+                          autoFocus
+                          value={newSubName}
+                          onChange={(e) => setNewSubName(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") handleAddSubcategory(cat.id, cat.direction, cat.color); if (e.key === "Escape") { setAddSubForCat(null); setNewSubName(""); } }}
+                          placeholder="Subcategory name…"
+                          className="flex-1 border-2 border-sq-black px-2 py-1 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
+                        />
+                        <button onClick={() => handleAddSubcategory(cat.id, cat.direction, cat.color)} className="text-sq-blue hover:text-sq-black"><Check className="w-4 h-4" /></button>
+                        <button onClick={() => { setAddSubForCat(null); setNewSubName(""); }} className="text-sq-gray-400 hover:text-sq-black"><X className="w-4 h-4" /></button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setAddSubForCat(cat.id)}
+                        className="flex items-center gap-1.5 px-8 py-2.5 w-full font-sans text-[12px] text-sq-gray-400 hover:text-sq-black transition-colors"
+                      >
+                        <Plus className="w-3 h-3" /> Add subcategory
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Add top-level category */}
+        {addingTopLevel ? (
+          <div className="flex items-center gap-2">
+            <input
+              autoFocus
+              value={newTopLevelName}
+              onChange={(e) => setNewTopLevelName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleAddTopLevel(); if (e.key === "Escape") { setAddingTopLevel(false); setNewTopLevelName(""); } }}
+              placeholder={`New ${catTab} category name…`}
+              className="flex-1 border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue"
+            />
+            <Button size="sm" onClick={handleAddTopLevel}>Add</Button>
+            <Button size="sm" variant="ghost" onClick={() => { setAddingTopLevel(false); setNewTopLevelName(""); }}>Cancel</Button>
+          </div>
+        ) : (
+          <Button size="sm" variant="secondary" onClick={() => setAddingTopLevel(true)}>
             <Plus className="w-3 h-3" /> Add Category
           </Button>
-        </div>
+        )}
       </div>
-
-      {editingCategory && (
-        <Card className="mb-6">
-          <div className="grid grid-cols-3 gap-4">
-            <Input label="Name" value={editingCategory.name || ""} onChange={(e) => setEditingCategory({ ...editingCategory, name: e.target.value })} />
-            <div className="mb-6">
-              <label className="block sq-label mb-2">Color</label>
-              <input
-                type="color"
-                value={editingCategory.color || "#D4D4D4"}
-                onChange={(e) => setEditingCategory({ ...editingCategory, color: e.target.value })}
-                className="w-full h-[46px] border-2 border-sq-black cursor-pointer"
-              />
-            </div>
-            <div className="mb-6">
-              <label className="block sq-label mb-2">Shared Category</label>
-              <button
-                onClick={() => setEditingCategory({ ...editingCategory, is_shared: !editingCategory.is_shared })}
-                className={cn(
-                  "w-full border-2 py-3 font-sans font-semibold text-[12px] uppercase tracking-wider transition-colors",
-                  editingCategory.is_shared ? "bg-amber-500 text-sq-white border-amber-500" : "border-sq-black text-sq-black"
-                )}
-              >
-                {editingCategory.is_shared ? "Shared — Yes" : "Not Shared"}
-              </button>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button size="sm" onClick={handleSaveCategory}>Save</Button>
-            <Button size="sm" variant="ghost" onClick={() => setEditingCategory(null)}>Cancel</Button>
-          </div>
-        </Card>
-      )}
-
-      <div className="grid grid-cols-2 gap-3">
-        {categories.map((cat) => (
-          <div key={cat.id} className="border-2 border-sq-black px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-4 h-4 rounded-full border border-sq-black" style={{ backgroundColor: cat.color || "#D4D4D4" }} />
-              <span className="font-sans text-[14px] text-sq-black">{cat.name}</span>
-              {cat.is_shared && <Badge variant="shared">Shared</Badge>}
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setEditingCategory(cat)} className="text-sq-gray-600 hover:text-sq-black">
-                <Edit className="w-4 h-4" />
-              </button>
-              <button onClick={() => handleDeleteCategory(cat.id)} className="text-sq-gray-600 hover:text-sq-red">
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+    );
+  };
 
   const renderRules = () => (
     <div>
@@ -477,15 +567,19 @@ export default function SettingsPage() {
             />
           </div>
           <div>
-            <label className="block sq-label mb-2">Auto-assign Category (optional)</label>
+            <label className="block sq-label mb-2">Auto-assign Subcategory (optional)</label>
             <select
               value={newRuleCategoryId}
               onChange={(e) => setNewRuleCategoryId(e.target.value)}
               className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue"
             >
               <option value="">— no category —</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
+              {categories.filter((c) => !c.parent_id).map((parent) => (
+                <optgroup key={parent.id} label={parent.name}>
+                  {categories.filter((c) => c.parent_id === parent.id && !c.is_archived).map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </div>
@@ -555,8 +649,12 @@ export default function SettingsPage() {
                       className="w-full border-2 border-sq-black px-2 py-1 font-sans text-[13px] outline-none focus:border-sq-blue bg-white"
                     >
                       <option value="">— no category —</option>
-                      {categories.map((c) => (
-                        <option key={c.id} value={c.id}>{c.name}</option>
+                      {categories.filter((c) => !c.parent_id).map((parent) => (
+                        <optgroup key={parent.id} label={parent.name}>
+                          {categories.filter((c) => c.parent_id === parent.id && !c.is_archived).map((c) => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                   </div>
