@@ -126,8 +126,8 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
   return subs.sort((a, b) => b.totalSpent - a.totalSpent);
 }
 
-function isActive(sub: DetectedSub): boolean {
-  const daysSinceLast = daysBetween(sub.lastDate, new Date().toISOString().slice(0, 10));
+function isActive(sub: DetectedSub, dataHorizon: string): boolean {
+  const daysSinceLast = daysBetween(sub.lastDate, dataHorizon);
   return daysSinceLast <= sub.intervalDays * 1.5;
 }
 
@@ -204,6 +204,7 @@ function SubTable({
   saveEdit,
   setEditing,
   toggleHidden,
+  dataHorizon,
 }: {
   subs: DetectedSub[];
   categories: Category[];
@@ -220,8 +221,9 @@ function SubTable({
   saveEdit: (desc: string) => void;
   setEditing: (v: string | null) => void;
   toggleHidden: (desc: string, e: React.MouseEvent) => void;
+  dataHorizon: string;
 }) {
-  const isOverdue = (next: string) => new Date(next) < new Date();
+  const isOverdue = (next: string) => next < dataHorizon;
   const getOverride = (desc: string): SubOverride =>
     overrides[desc] ?? { customName: "", notes: "", hidden: false };
 
@@ -398,22 +400,30 @@ export default function SubscriptionsPage() {
 
   const allSubs = useMemo(() => detectSubs(transactions), [transactions]);
 
+  // Use the latest transaction date as the reference point instead of today,
+  // so subscriptions aren't wrongly classified as "past" just because no
+  // data has been uploaded yet for recent months.
+  const dataHorizon = useMemo(() => {
+    if (transactions.length === 0) return new Date().toISOString().slice(0, 10);
+    return transactions.reduce((max, t) => t.date > max ? t.date : max, transactions[0].date);
+  }, [transactions]);
+
   // For tables: respects showHidden toggle
   const activeSubs = useMemo(() =>
-    allSubs.filter((s) => isActive(s) && (showHidden || !(overrides[s.description]?.hidden))),
-    [allSubs, overrides, showHidden]
+    allSubs.filter((s) => isActive(s, dataHorizon) && (showHidden || !(overrides[s.description]?.hidden))),
+    [allSubs, dataHorizon, overrides, showHidden]
   );
   const pastSubs = useMemo(() =>
-    allSubs.filter((s) => !isActive(s) && (showHidden || !(overrides[s.description]?.hidden))),
-    [allSubs, overrides, showHidden]
+    allSubs.filter((s) => !isActive(s, dataHorizon) && (showHidden || !(overrides[s.description]?.hidden))),
+    [allSubs, dataHorizon, overrides, showHidden]
   );
 
   const hiddenCount = useMemo(() => allSubs.filter((s) => overrides[s.description]?.hidden).length, [allSubs, overrides]);
 
   // For overview: always exclude hidden subs regardless of showHidden toggle
   const activeSubsVisible = useMemo(() =>
-    allSubs.filter((s) => isActive(s) && !overrides[s.description]?.hidden),
-    [allSubs, overrides]
+    allSubs.filter((s) => isActive(s, dataHorizon) && !overrides[s.description]?.hidden),
+    [allSubs, dataHorizon, overrides]
   );
 
   // Total monthly cost — only non-hidden active subs
@@ -462,7 +472,7 @@ export default function SubscriptionsPage() {
     patchOverride(desc, { hidden: !getOverride(desc).hidden });
   };
 
-  const tableProps = { categories, displayCurrency, overrides, expanded, setExpanded, editing, editName, editNotes, setEditName, setEditNotes, startEdit, saveEdit, setEditing, toggleHidden };
+  const tableProps = { categories, displayCurrency, overrides, expanded, setExpanded, editing, editName, editNotes, setEditName, setEditNotes, startEdit, saveEdit, setEditing, toggleHidden, dataHorizon };
 
   return (
     <PageShell userName={userName}>
