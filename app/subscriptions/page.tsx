@@ -56,7 +56,9 @@ function addDays(dateStr: string, days: number): string {
 function detectSubs(transactions: Transaction[]): DetectedSub[] {
   const groups = new Map<string, Transaction[]>();
   for (const tx of transactions) {
-    if (tx.amount <= 0) continue;
+    // Skip zero-amount, income, and internal transfers — keep expenses regardless of sign
+    if (tx.amount === 0) continue;
+    if (tx.transaction_type === "income" || tx.transaction_type === "internal_transfer") continue;
     const key = tx.description.toLowerCase().trim();
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(tx);
