@@ -79,11 +79,11 @@ export default function CategorizePage() {
         const initial: Record<string, string> = {};
         const suggested = new Set<string>();
 
-        for (const desc of uncategorizedDescs) {
+        for (const desc of Array.from(uncategorizedDescs)) {
           const catMap = freq.get(desc);
           if (catMap) {
             // Pick the category used most often for this exact description
-            const [topCatId] = [...catMap.entries()].sort((a, b) => b[1] - a[1])[0];
+            const [topCatId] = Array.from(catMap.entries()).sort((a, b) => b[1] - a[1])[0];
             initial[desc] = topCatId;
             suggested.add(desc);
           }

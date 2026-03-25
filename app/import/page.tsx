@@ -241,12 +241,30 @@ export default function ImportPage() {
             if (uIdx >= 0) colUtlBelopp = uIdx;
           }
           const startIdx = headerIdx >= 0 ? headerIdx + 1 : kopIdx + 2;
-          txRows = allRows.slice(startIdx).filter((row) => {
+          const kopRows = allRows.slice(startIdx).filter((row) => {
             const col0 = String(row[0] || "");
             if (!(/^\d{4}-\d{2}-\d{2}$/.test(col0))) return false;
             if (typeof row[colBelopp] !== "number") return false;
             return true;
           });
+
+          // Also extract interest/fee rows from "Totalt övriga händelser" section
+          // (i.e. rows before kopIdx with a date and amount, excluding Inbetalning)
+          const firstHeaderIdx = allRows.findIndex(
+            (row) => String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
+          );
+          const extraChargeRows = (firstHeaderIdx >= 0 && kopIdx > firstHeaderIdx)
+            ? allRows.slice(firstHeaderIdx + 1, kopIdx).filter((row) => {
+                const col0 = String(row[0] || "");
+                if (!(/^\d{4}-\d{2}-\d{2}$/.test(col0))) return false;
+                if (typeof row[colBelopp] !== "number") return false;
+                const desc = String(row[2] || "").toLowerCase().trim();
+                if (desc === "inbetalning") return false;
+                return true;
+              })
+            : [];
+
+          txRows = [...extraChargeRows, ...kopRows];
         } else {
           // Fallback: filter by date+amount and exclude non-transaction rows
           txRows = allRows.filter((row) => {
