@@ -245,6 +245,28 @@ export default function AccountsPage() {
     setSaving(null);
   };
 
+  // ─── Delete import batch + transactions ──────
+  const handleDeleteBatch = async (period: BillingPeriod) => {
+    const confirmed = window.confirm(
+      `Delete "${period.fileName.replace(/\.[^.]+$/, "")}"?\n\nThis will permanently delete the import batch and ALL ${period.chargeCount} transactions in it. This cannot be undone.`
+    );
+    if (!confirmed) return;
+    setSaving(period.batchId);
+    // Remove confirmed bill mapping first (so payment tx type gets reset)
+    if (period.confirmedBill) {
+      const bill = period.confirmedBill;
+      if (bill.payment_transaction_id) {
+        await supabase.from("transactions").update({ transaction_type: "expense" }).eq("id", bill.payment_transaction_id);
+      }
+      await supabase.from("credit_card_bills").delete().eq("id", bill.id);
+    }
+    // Delete the batch — transactions cascade-delete via FK
+    await supabase.from("import_batches").delete().eq("id", period.batchId);
+    toast("Import deleted");
+    if (view.mode === "cc_billing") await loadCCBilling(view.accountId);
+    setSaving(null);
+  };
+
   // ─── Account actions ─────────────────────────
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -571,6 +593,14 @@ export default function AccountsPage() {
                             <Link className="w-3 h-3" />Match
                           </button>
                         )}
+                        <button
+                          onClick={() => handleDeleteBatch(period)}
+                          disabled={isSaving}
+                          className="px-2 py-1 border border-sq-gray-400 font-sans text-[11px] uppercase font-semibold text-sq-gray-600 hover:border-sq-red hover:text-sq-red transition-colors disabled:opacity-40 flex items-center gap-1"
+                          title="Delete import and all transactions"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
                       </div>
                     </div>
 
