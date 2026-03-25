@@ -882,13 +882,10 @@ function TransactionDetailPanel({
             <Button size="sm" onClick={handleSave} disabled={saving}>
               {saving ? "Saving…" : "Save"}
             </Button>
-            <Button size="sm" variant="secondary" onClick={onOpenCcModal}>
-              CC Bill
-            </Button>
             {tx.transaction_type !== "internal_transfer" ? (
               <Button
                 size="sm"
-                variant="ghost"
+                variant="secondary"
                 onClick={async () => {
                   await supabase.from("transactions").update({ transaction_type: "internal_transfer" }).eq("id", tx.id);
                   onUpdate();
@@ -899,7 +896,7 @@ function TransactionDetailPanel({
             ) : (
               <Button
                 size="sm"
-                variant="ghost"
+                variant="secondary"
                 onClick={async () => {
                   const type = tx.amount > 0 ? "expense" : "income";
                   await supabase.from("transactions").update({ transaction_type: type }).eq("id", tx.id);
