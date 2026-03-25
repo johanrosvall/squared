@@ -855,9 +855,17 @@ function TransactionDetailPanel({
               className="w-full border-2 border-sq-black px-3 py-2 font-sans text-[13px] outline-none focus:border-sq-blue bg-sq-white"
             >
               <option value="">— Select category —</option>
-              {topLevelCats.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
+              {(["expense", "income", "transfer"] as const).map((dir) => {
+                const group = topLevelCats.filter((c) => c.direction === dir);
+                if (group.length === 0) return null;
+                return (
+                  <optgroup key={dir} label={dir.charAt(0).toUpperCase() + dir.slice(1)}>
+                    {group.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </select>
           </div>
           {categoryId && (
