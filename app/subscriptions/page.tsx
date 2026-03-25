@@ -34,6 +34,7 @@ interface DetectedSub {
   frequency: string;
   intervalDays: number;
   averageAmount: number;
+  lastAmount: number;
   lastDate: string;
   nextExpected: string;
   totalSpent: number;
@@ -97,6 +98,7 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
     if (amountStdDev > avgAmount * 0.3) continue;
 
     const lastDate = sorted[sorted.length - 1].date;
+    const lastAmount = Math.abs(sorted[sorted.length - 1].amount);
 
     // Most common category_id across transactions
     const freq = new Map<string | null, number>();
@@ -114,6 +116,7 @@ function detectSubs(transactions: Transaction[]): DetectedSub[] {
       frequency,
       intervalDays,
       averageAmount: avgAmount,
+      lastAmount,
       lastDate,
       nextExpected: addDays(lastDate, intervalDays),
       totalSpent: amounts.reduce((a, b) => a + b, 0),
@@ -132,7 +135,7 @@ function isActive(sub: DetectedSub, dataHorizon: string): boolean {
 }
 
 function monthlyEquivalent(sub: DetectedSub): number {
-  return sub.averageAmount * (30 / sub.intervalDays);
+  return sub.lastAmount * (30 / sub.intervalDays);
 }
 
 // --- Simple SVG pie chart ---
@@ -286,7 +289,7 @@ function SubTable({
               </div>
 
               <div className="col-span-2 text-right font-mono text-[14px] font-bold text-sq-red">
-                {formatCurrency(sub.averageAmount, displayCurrency)}
+                {formatCurrency(sub.lastAmount, displayCurrency)}
               </div>
 
               <div className="col-span-1 text-right font-mono text-[13px] text-sq-gray-600">
