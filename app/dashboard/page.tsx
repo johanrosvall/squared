@@ -86,7 +86,7 @@ export default function DashboardPage() {
     (async () => {
       let txQuery = supabase
         .from("transactions")
-        .select("*, category:categories(*), account:accounts!account_id(*)")
+        .select("*, category:categories!category_id(*), account:accounts!account_id(*)")
         .neq("transaction_type", "cc_payment")
         .neq("transaction_type", "internal_transfer")
         .order("date", { ascending: false });

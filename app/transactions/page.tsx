@@ -240,7 +240,7 @@ export default function TransactionsPage() {
     setLoading(true);
     let query = supabase
       .from("transactions")
-      .select("*, category:categories(*), account:accounts!account_id(*)")
+      .select("*, category:categories!category_id(*), account:accounts!account_id(*)")
       .neq("transaction_type", "cc_payment")
       .order("date", { ascending: false });
 

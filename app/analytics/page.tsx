@@ -154,7 +154,7 @@ export default function AnalyticsPage() {
     setRateMap(new Map());
     supabase
       .from("transactions")
-      .select("*, category:categories(*), account:accounts!account_id(*)")
+      .select("*, category:categories!category_id(*), account:accounts!account_id(*)")
       .gte("date", from)
       .lte("date", to)
       .neq("transaction_type", "cc_payment")

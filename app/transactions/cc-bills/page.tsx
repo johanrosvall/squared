@@ -42,7 +42,7 @@ export default function CreditCardBillPage() {
           billData.map(async (bill: CreditCardBill) => {
             const { data: charges } = await supabase
               .from("transactions")
-              .select("*, category:categories(*)")
+              .select("*, category:categories!category_id(*)")
               .eq("account_id", bill.credit_card_account_id)
               .gte("date", bill.statement_start_date)
               .lte("date", bill.statement_end_date)
