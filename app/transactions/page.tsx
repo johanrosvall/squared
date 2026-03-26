@@ -51,6 +51,7 @@ export default function TransactionsPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("unified");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
+  const [search, setSearch] = useState("");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -271,19 +272,30 @@ export default function TransactionsPage() {
     // 1. CC payments (cc_payment type) are shown as transfers, not expenses
     // 2. Shared account transactions show 50% amount
     // 3. Credit card charges within a bill are "exploded" to their purchase dates
-    return transactions.map((tx) => {
-      const account = tx.account as Account | undefined;
-      if (account?.type === "shared" && tx.is_shared) {
-        return { ...tx, amount: tx.amount * 0.5 };
-      }
-      return tx;
-    });
+    const needle = search.trim().toLowerCase();
+    return transactions
+      .filter((tx) => !needle ||
+        tx.description.toLowerCase().includes(needle) ||
+        (tx.notes ?? "").toLowerCase().includes(needle))
+      .map((tx) => {
+        const account = tx.account as Account | undefined;
+        if (account?.type === "shared" && tx.is_shared) {
+          return { ...tx, amount: tx.amount * 0.5 };
+        }
+        return tx;
+      });
   };
 
   // ─── Per-Account Grouped ─────────────────────
   const getGroupedTransactions = (): Map<string, Transaction[]> => {
+    const needle = search.trim().toLowerCase();
+    const filtered = needle
+      ? transactions.filter((tx) =>
+          tx.description.toLowerCase().includes(needle) ||
+          (tx.notes ?? "").toLowerCase().includes(needle))
+      : transactions;
     const groups = new Map<string, Transaction[]>();
-    for (const tx of transactions) {
+    for (const tx of filtered) {
       const acctId = tx.account_id;
       if (!groups.has(acctId)) groups.set(acctId, []);
       groups.get(acctId)!.push(tx);
@@ -582,6 +594,13 @@ export default function TransactionsPage() {
               Unified
             </button>
           </div>
+          <input
+            type="text"
+            placeholder="Search transactions…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-56 border-2 border-sq-black px-3 py-2 font-sans text-[12px] outline-none focus:border-sq-blue bg-sq-white placeholder:text-sq-gray-400"
+          />
           <button
             onClick={() => setFiltersOpen(!filtersOpen)}
             className={cn(
@@ -602,7 +621,9 @@ export default function TransactionsPage() {
       {/* Transaction count + actions */}
       <div className="flex justify-between items-center py-4">
         <span className="font-mono text-[13px] text-sq-gray-600">
-          {loading ? "Loading…" : `${transactions.length} transactions`}
+          {loading ? "Loading…" : search.trim()
+            ? `${getUnifiedTransactions().length} of ${transactions.length} transactions`
+            : `${transactions.length} transactions`}
         </span>
         <div className="flex gap-3">
           <button
