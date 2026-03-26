@@ -53,9 +53,16 @@ function addDays(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-function detectSubs(transactions: Transaction[]): DetectedSub[] {
+function detectSubs(transactions: Transaction[], dataHorizon: string): DetectedSub[] {
+  // Only consider transactions within the last 2 years of the data horizon.
+  // This prevents subscriptions that stopped years ago from appearing as active.
+  const cutoff = new Date(dataHorizon);
+  cutoff.setFullYear(cutoff.getFullYear() - 2);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const recent = transactions.filter((t) => t.date >= cutoffStr);
+
   const groups = new Map<string, Transaction[]>();
-  for (const tx of transactions) {
+  for (const tx of recent) {
     // Skip zero-amount, income, and internal transfers — keep expenses regardless of sign
     if (tx.amount === 0) continue;
     if (tx.transaction_type === "income" || tx.transaction_type === "internal_transfer") continue;
@@ -403,8 +410,6 @@ export default function SubscriptionsPage() {
     })();
   }, [supabase]);
 
-  const allSubs = useMemo(() => detectSubs(transactions), [transactions]);
-
   // Use the latest transaction date as the reference point instead of today,
   // so subscriptions aren't wrongly classified as "past" just because no
   // data has been uploaded yet for recent months.
@@ -412,6 +417,8 @@ export default function SubscriptionsPage() {
     if (transactions.length === 0) return new Date().toISOString().slice(0, 10);
     return transactions.reduce((max, t) => t.date > max ? t.date : max, transactions[0].date);
   }, [transactions]);
+
+  const allSubs = useMemo(() => detectSubs(transactions, dataHorizon), [transactions, dataHorizon]);
 
   // For tables: respects showHidden toggle
   const activeSubs = useMemo(() =>
