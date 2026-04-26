@@ -536,7 +536,16 @@ export default function ImportPage() {
         </div>
       )}
 
-      <div className="flex justify-end mt-8">
+      <div className="flex items-center justify-end gap-4 mt-8">
+        {(!selectedAccountId || rows.length === 0) && (
+          <span className="font-sans text-[12px] text-sq-gray-600 italic">
+            {!selectedAccountId && rows.length === 0
+              ? "Select an account and upload a file to continue"
+              : !selectedAccountId
+                ? "Select an account to continue"
+                : "Upload a file with at least one transaction to continue"}
+          </span>
+        )}
         <Button
           disabled={!selectedAccountId || rows.length === 0}
           onClick={() => (isXlsxFormat || savedMappingLoaded) ? handleCheckDuplicates() : setStep(2)}
