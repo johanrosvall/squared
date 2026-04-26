@@ -796,6 +796,11 @@ export default function ImportPage() {
       if (mapping.amount_sign === "invert") amt = -amt;
       const parsedDate = new Date(dateStr);
       if (isNaN(parsedDate.getTime())) continue;
+      const yr = parsedDate.getUTCFullYear();
+      if (yr < 1970 || yr > 2100) {
+        console.warn("[Import] skipping row with out-of-range date", { dateStr, year: yr, row: rowObj });
+        continue;
+      }
       const dateFormatted = parsedDate.toISOString().split("T")[0];
       // Use loose matching if sensitivity is set to "loose" (match on date+amount only)
       const sensitivity = (() => { try { return localStorage.getItem("sq_dup_sensitivity") || "strict"; } catch { return "strict"; } })();
@@ -976,8 +981,17 @@ export default function ImportPage() {
           if (mapping.amount_sign === "invert") amt = -amt;
           const parsedDate = new Date(dateStr);
           if (isNaN(parsedDate.getTime())) throw new Error("Invalid date");
+          const yr = parsedDate.getUTCFullYear();
+          if (yr < 1970 || yr > 2100) throw new Error(`Date out of range (year ${yr}): "${dateStr}"`);
           const dateFormatted = parsedDate.toISOString().split("T")[0];
-          const postedFormatted = postedStr ? new Date(postedStr).toISOString().split("T")[0] : null;
+          let postedFormatted: string | null = null;
+          if (postedStr) {
+            const pd = new Date(postedStr);
+            const py = pd.getUTCFullYear();
+            if (!isNaN(pd.getTime()) && py >= 1970 && py <= 2100) {
+              postedFormatted = pd.toISOString().split("T")[0];
+            }
+          }
           const rowCurrency = isXlsxFormat ? "" : (rowObj["Valuta"] || "");
 
           txRows.push({
