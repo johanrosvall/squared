@@ -206,13 +206,52 @@ export default function ImportPage() {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as (string | number)[][];
 
+      // ── Tolerant value coercers ──────────────────────────────────────
+      const eqHeader = (a: unknown, b: string) =>
+        String(a ?? "").trim().toLowerCase() === b.toLowerCase();
+
+      const coerceDate = (v: unknown): string => {
+        if (v == null || v === "") return "";
+        // Excel date serial number (days since 1899-12-30)
+        if (typeof v === "number" && v > 25569 && v < 70000) {
+          const ms = Math.round((v - 25569) * 86400) * 1000;
+          const d = new Date(ms);
+          if (!isNaN(d.getTime())) {
+            const yyyy = d.getUTCFullYear();
+            const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+            const dd = String(d.getUTCDate()).padStart(2, "0");
+            return `${yyyy}-${mm}-${dd}`;
+          }
+        }
+        const s = String(v).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+        const m1 = s.match(/^(\d{4})[\/.](\d{1,2})[\/.](\d{1,2})$/);
+        if (m1) return `${m1[1]}-${m1[2].padStart(2, "0")}-${m1[3].padStart(2, "0")}`;
+        const m2 = s.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})$/);
+        if (m2) return `${m2[3]}-${m2[2].padStart(2, "0")}-${m2[1].padStart(2, "0")}`;
+        return "";
+      };
+
+      const coerceAmount = (v: unknown): number | null => {
+        if (typeof v === "number" && !isNaN(v)) return v;
+        if (v == null || v === "") return null;
+        const cleaned = String(v)
+          .replace(/ /g, " ")
+          .replace(/\s|kr|SEK/gi, "")
+          .replace(/,/g, ".");
+        const stripped = cleaned.replace(/[^\d.\-]/g, "");
+        if (stripped === "" || stripped === "-" || stripped === ".") return null;
+        const n = Number(stripped);
+        return isNaN(n) ? null : n;
+      };
+
       const isFaktura = allRows.some(
-        (row) => String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
+        (row) => eqHeader(row[0], "Datum") && eqHeader(row[1], "Bokfört")
       );
 
       if (isFaktura) {
         // ── Extract month name from "Månad" row for CSV filename ──
-        const manadRow = allRows.find((row) => String(row[0]).trim() === "Månad");
+        const manadRow = allRows.find((row) => eqHeader(row[0], "Månad"));
         const manad = manadRow
           ? String(manadRow.find((v, i) => i > 0 && v !== "") || "").trim()
           : "";
@@ -221,60 +260,80 @@ export default function ImportPage() {
         // The file has two sections:
         //   "Totalt övriga händelser" — contains Inbetalning, Ränta, Saldo (skip)
         //   "Köp/uttag"              — actual purchases and refunds (keep)
-        const kopIdx = allRows.findIndex((row) => String(row[0]).trim() === "Köp/uttag");
+        const kopIdx = allRows.findIndex((row) => eqHeader(row[0], "Köp/uttag"));
 
         // Find column indices from the section's own header row — do NOT hardcode
         let colBelopp = 6;    // Belopp (SEK amount)
         let colUtlBelopp = 5; // Utl. belopp (foreign currency amount)
 
+        const stats = { checked: 0, badDate: 0, badAmount: 0 };
+        const tryParseRow = (row: (string | number)[]): (string | number)[] | null => {
+          stats.checked++;
+          const date = coerceDate(row[0]);
+          if (!date) { stats.badDate++; return null; }
+          const amount = coerceAmount(row[colBelopp]);
+          if (amount === null) { stats.badAmount++; return null; }
+          const newRow = [...row];
+          newRow[0] = date;
+          newRow[colBelopp] = amount;
+          const utl = coerceAmount(row[colUtlBelopp]);
+          if (utl !== null) newRow[colUtlBelopp] = utl;
+          return newRow;
+        };
+
         let txRows: (string | number)[][];
         if (kopIdx >= 0) {
           // Find the Datum/Bokfört header row inside the Köp/uttag section
           const headerIdx = allRows.findIndex(
-            (row, i) => i > kopIdx && String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
+            (row, i) => i > kopIdx && eqHeader(row[0], "Datum") && eqHeader(row[1], "Bokfört")
           );
           if (headerIdx >= 0) {
             const hRow = allRows[headerIdx];
-            const bIdx = hRow.findIndex((h) => String(h).trim() === "Belopp");
-            const uIdx = hRow.findIndex((h) => String(h).trim() === "Utl. belopp");
+            const bIdx = hRow.findIndex((h) => eqHeader(h, "Belopp"));
+            const uIdx = hRow.findIndex((h) => eqHeader(h, "Utl. belopp"));
             if (bIdx >= 0) colBelopp = bIdx;
             if (uIdx >= 0) colUtlBelopp = uIdx;
           }
           const startIdx = headerIdx >= 0 ? headerIdx + 1 : kopIdx + 2;
-          const kopRows = allRows.slice(startIdx).filter((row) => {
-            const col0 = String(row[0] || "");
-            if (!(/^\d{4}-\d{2}-\d{2}$/.test(col0))) return false;
-            if (typeof row[colBelopp] !== "number") return false;
-            return true;
-          });
+          const kopRows = allRows.slice(startIdx)
+            .map(tryParseRow)
+            .filter((r): r is (string | number)[] => r !== null);
 
-          // Also extract interest/fee rows from "Totalt övriga händelser" section
-          // (i.e. rows before kopIdx with a date and amount, excluding Inbetalning)
           const firstHeaderIdx = allRows.findIndex(
-            (row) => String(row[0]).trim() === "Datum" && String(row[1]).trim() === "Bokfört"
+            (row) => eqHeader(row[0], "Datum") && eqHeader(row[1], "Bokfört")
           );
           const extraChargeRows = (firstHeaderIdx >= 0 && kopIdx > firstHeaderIdx)
-            ? allRows.slice(firstHeaderIdx + 1, kopIdx).filter((row) => {
-                const col0 = String(row[0] || "");
-                if (!(/^\d{4}-\d{2}-\d{2}$/.test(col0))) return false;
-                if (typeof row[colBelopp] !== "number") return false;
-                const desc = String(row[2] || "").toLowerCase().trim();
-                if (desc === "inbetalning") return false;
-                return true;
-              })
+            ? allRows.slice(firstHeaderIdx + 1, kopIdx)
+                .map(tryParseRow)
+                .filter((r): r is (string | number)[] => r !== null)
+                .filter((row) => String(row[2] || "").toLowerCase().trim() !== "inbetalning")
             : [];
 
           txRows = [...extraChargeRows, ...kopRows];
         } else {
-          // Fallback: filter by date+amount and exclude non-transaction rows
-          txRows = allRows.filter((row) => {
-            const dateStr = String(row[0] || "");
-            if (!(/^\d{4}-\d{2}-\d{2}$/.test(dateStr))) return false;
-            if (typeof row[colBelopp] !== "number") return false;
-            const desc = String(row[2] || "").toLowerCase().trim();
-            if (desc === "inbetalning") return false;
-            if (desc.startsWith("ränta") || desc.startsWith("dröjsmål")) return false;
-            return true;
+          txRows = allRows
+            .map(tryParseRow)
+            .filter((r): r is (string | number)[] => r !== null)
+            .filter((row) => {
+              const desc = String(row[2] || "").toLowerCase().trim();
+              if (desc === "inbetalning") return false;
+              if (desc.startsWith("ränta") || desc.startsWith("dröjsmål")) return false;
+              return true;
+            });
+        }
+
+        if (txRows.length === 0) {
+          console.warn("[Faktura XLSX] 0 rows extracted", {
+            totalChecked: stats.checked,
+            rejectedBadDate: stats.badDate,
+            rejectedBadAmount: stats.badAmount,
+            colBelopp,
+            colUtlBelopp,
+            kopIdx,
+            sample: allRows.slice(0, 12).map((r, i) => ({
+              i, col0: r[0], type0: typeof r[0],
+              colBelopp: r[colBelopp], typeBelopp: typeof r[colBelopp],
+            })),
           });
         }
 
