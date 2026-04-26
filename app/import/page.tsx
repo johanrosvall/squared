@@ -947,9 +947,10 @@ export default function ImportPage() {
               <Button
                 size="sm"
                 variant="secondary"
-                onClick={() => setDuplicates((d) => d.map((x) => ({ ...x, action: "skip" })))}
+                disabled={importing}
+                onClick={() => handleImport({ skipAllDuplicates: true })}
               >
-                Skip All
+                Skip All &amp; Import
               </Button>
               <Button
                 size="sm"
@@ -1007,7 +1008,7 @@ export default function ImportPage() {
         <Button variant="ghost" onClick={() => setStep((isXlsxFormat || savedMappingLoaded) ? 1 : 2)}>
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
-        <Button onClick={handleImport} disabled={importing}>
+        <Button onClick={() => handleImport()} disabled={importing}>
           {importing
             ? (importStatus || "Importing…")
             : `Import ${nonDuplicateRows.length + duplicates.filter((d) => d.action === "import").length} Transactions`}
@@ -1018,17 +1019,18 @@ export default function ImportPage() {
   );
 
   // ─── Import Execution ────────────────────────
-  const handleImport = async () => {
+  const handleImport = async (opts?: { skipAllDuplicates?: boolean }) => {
     setImporting(true);
     setImportStatus("Preparing rows…");
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) { setImporting(false); return; }
 
+    const skipAll = opts?.skipAllDuplicates === true;
     const toImport = [
       ...nonDuplicateRows,
-      ...duplicates.filter((d) => d.action === "import").map((d) => d.row),
+      ...(skipAll ? [] : duplicates.filter((d) => d.action === "import").map((d) => d.row)),
     ];
-    const skipped = duplicates.filter((d) => d.action === "skip").length;
+    const skipped = skipAll ? duplicates.length : duplicates.filter((d) => d.action === "skip").length;
 
     // Group rows by source file for per-file batch records
     const fileGroups = new Map<string, Record<string, string>[]>();
