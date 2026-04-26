@@ -1145,6 +1145,91 @@ export default function ImportPage() {
           }
         }
       } catch { /* ignore */ }
+
+      // Auto-link CC statement to the matching checking-account payment
+      // Only for credit-card target accounts. Goal: hide the bill payment from
+      // the transactions overview once its individual charges are imported.
+      try {
+        const targetAccount = accounts.find((a) => a.id === selectedAccountId);
+        if (targetAccount?.type === "credit_card" && successCount > 0) {
+          const { data: importedTxs } = await supabase
+            .from("transactions")
+            .select("id, date, amount")
+            .eq("import_batch_id", batch.id);
+
+          if (importedTxs && importedTxs.length > 0) {
+            const ccTotal = importedTxs.reduce((s, t) => s + Math.abs(Number(t.amount)), 0);
+            const lastTxDate = importedTxs.reduce((max, t) => t.date > max ? t.date : max, importedTxs[0].date);
+
+            // Find candidate payments in non-CC accounts:
+            //   - account is checking (not credit_card)
+            //   - amount > 0 (expense from checking, our convention)
+            //   - on/after the last CC transaction in this statement
+            //   - within 60 days of last CC transaction
+            //   - not already tagged as cc_payment
+            const checkingAcctIds = accounts.filter((a) => a.type !== "credit_card").map((a) => a.id);
+            if (checkingAcctIds.length > 0) {
+              const lastDate = new Date(lastTxDate);
+              const sixtyDaysLater = new Date(lastDate);
+              sixtyDaysLater.setDate(sixtyDaysLater.getDate() + 60);
+              const upper = sixtyDaysLater.toISOString().split("T")[0];
+
+              const { data: candidates } = await supabase
+                .from("transactions")
+                .select("id, date, amount, description, transaction_type")
+                .in("account_id", checkingAcctIds)
+                .gt("amount", 0)
+                .gte("date", lastTxDate)
+                .lte("date", upper)
+                .neq("transaction_type", "cc_payment");
+
+              if (candidates && candidates.length > 0) {
+                // Best match: closest amount, then closest date
+                const scored = candidates.map((c) => {
+                  const amtDiff = Math.abs(Math.abs(Number(c.amount)) - ccTotal);
+                  const dateDiff = Math.abs(new Date(c.date).getTime() - lastDate.getTime());
+                  return { tx: c, amtDiff, dateDiff };
+                }).sort((a, b) => a.amtDiff - b.amtDiff || a.dateDiff - b.dateDiff);
+
+                const best = scored[0];
+                const tolerance = Math.max(1, ccTotal * 0.01); // 1% or 1 SEK
+                if (best.amtDiff <= tolerance) {
+                  // Tag the payment
+                  await supabase
+                    .from("transactions")
+                    .update({ transaction_type: "cc_payment" })
+                    .eq("id", best.tx.id);
+
+                  // Create or update the bill record
+                  const sortedDates = importedTxs.map((t) => t.date).sort();
+                  const { data: existingBill } = await supabase
+                    .from("credit_card_bills")
+                    .select("id")
+                    .eq("payment_transaction_id", best.tx.id)
+                    .maybeSingle();
+                  const billPayload = {
+                    user_id: user.id,
+                    credit_card_account_id: selectedAccountId,
+                    payment_transaction_id: best.tx.id,
+                    total_amount: ccTotal,
+                    statement_start_date: sortedDates[0],
+                    statement_end_date: sortedDates[sortedDates.length - 1],
+                    is_exploded: false,
+                    import_batch_id: batch.id,
+                  };
+                  if (existingBill) {
+                    await supabase.from("credit_card_bills").update(billPayload).eq("id", existingBill.id);
+                  } else {
+                    await supabase.from("credit_card_bills").insert(billPayload);
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[Import] CC auto-link failed:", err);
+      }
     }
 
     if (selectedAccountId && !isXlsxFormat) saveMapping(selectedAccountId, mapping, false);
